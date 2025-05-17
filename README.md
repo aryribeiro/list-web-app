@@ -1,3 +1,5 @@
+Obs.: caso o app esteja no modo "sleeping" (dormindo) ao entrar, basta clicar no botão que estará disponível e aguardar, para ativar o mesmo.
+![print](https://github.com/user-attachments/assets/ee3db758-7dc9-4b41-a263-ccd8c6687be4)
 
 # 📝 List Web App - Sistema de Lista de Presença Digital
 

@@ -34,7 +34,7 @@ def get_public_ip():
         ip_data = response.json()
         return ip_data['ip']
     except:
-        return "Não foi possível obter o IP"
+        return "Não foi possível obter o IP."
 
 # Função para obter a data e hora atual no formato brasileiro
 def get_brazil_datetime():
