@@ -1,3 +1,7 @@
 .streamlit
 old.py
+old2.py
 registros.csv
+aula_estado.txt
+ip_professor.txt
+lista_presenca*.csv

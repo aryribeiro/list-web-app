@@ -2,3 +2,6 @@ streamlit
 pandas
 pytz
 requests
+datetime
+email-validator
+secure-smtplib
