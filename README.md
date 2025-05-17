@@ -51,19 +51,13 @@ List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamen
     source venv/bin/activate
     ```
 
-3.  **Instale as dependências:**
-    Crie um arquivo `requirements.txt` com o seguinte conteúdo:
-    ```txt
+3.  **Instale as dependências do requirements.txt:**
+    
     streamlit
     pandas
     requests
     pytz
-    ```
-    E então instale:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
+    
 4.  **Configure os Segredos (`secrets.toml`):**
     Crie um arquivo chamado `.secrets.toml` na pasta `.streamlit` dentro do diretório do seu projeto (`seu_projeto/.streamlit/secrets.toml`). Adicione o seguinte conteúdo, substituindo pelos seus dados:
 
