@@ -34,19 +34,47 @@ if user_ip_from_query:
 else:
     st.session_state.user_ip = None
 
-# If user_ip is Stuart IP fetching script
+# If user_ip is None, inject JavaScript to fetch IP and append to query params
 if st.session_state.user_ip is None:
     html("""
     <script>
-    if (!window.location.search.includes('ip=')) {
-        fetch('https://api.ipify.org?format=json')
-            .then(response => response.json())
-            .then(data => {
-                window.location.search = '?ip=' + data.ip;
-            })
-            .catch(error => {
+    async function setIpQueryParam() {
+        const params = new URLSearchParams(window.location.search);
+        if (!params.has('ip')) {
+            try {
+                let response = await fetch('https://ipinfo.io/json', {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json' }
+                });
+                if (!response.ok) {
+                    console.warn('Falha ao buscar IP de ipinfo.io. Tentando api.ipify.org...');
+                    response = await fetch('https://api.ipify.org?format=json', {
+                        method: 'GET',
+                        headers: { 'Accept': 'application/json' }
+                    });
+                }
+                if (!response.ok) {
+                    throw new Error('Falha na resposta da rede');
+                }
+                const data = await response.json();
+                const ip = data.ip;
+                if (ip) {
+                    params.set('ip', ip);
+                    window.location.search = params.toString();
+                } else {
+                    console.error('IP não encontrado na resposta');
+                }
+            } catch (error) {
                 console.error('Erro ao obter IP:', error);
-            });
+            }
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', setIpQueryParam);
+    } else {
+        setIpQueryParam();
+    }
     </script>
     """, height=0)
 
@@ -243,7 +271,7 @@ def enviar_lista_por_email():
                 st.success("Email enviado com sucesso!")
             else:
                 st.warning("Para enviar emails reais, configure as credenciais no arquivo secrets.toml ou diretamente no código.")
-                st.info("Instruções: \n1. Crie uma senha de app no Gmail: https://support.google.com/accounts/answer/185833 \n2. Configure as credenciais no arquivo secrets.toml ou diretamente no código.")
+                st.info("Instruções: \n1. Crie uma senha de app no Gmail: https://myaccount.google.com/security \n2. Configure as credenciais no arquivo secrets.toml ou diretamente no código.")
                 st.warning("Simulação: Email enviado.")
             
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -553,36 +581,4 @@ st.markdown("""
     <h4>List Web App! - Lista de presença digital</h4>
     <p>Por Ary Ribeiro. Contato, através do email <a href="mailto:aryribeiro@gmail.com">aryribeiro@gmail.com</a></p>
 </div>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
-    .main {
-        background-color: #ffffff;
-        color: #333333;
-    }
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 0rem;
-    }
-    /* Esconde completamente todos os elementos da barra padrão do Streamlit */
-    header {display: none !important;}
-    footer {display: none !important;}
-    #MainMenu {display: none !important;}
-    /* Remove qualquer espaço em branco adicional */
-    div[data-testid="stAppViewBlockContainer"] {
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
-    }
-    div[data-testid="stVerticalBlock"] {
-        gap: 0 !important;
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
-    }
-    /* Remove quaisquer margens extras */
-    .element-container {
-        margin-top: 0 !important;
-        margin-bottom: 0 !important;
-    }
-</style>
 """, unsafe_allow_html=True)
