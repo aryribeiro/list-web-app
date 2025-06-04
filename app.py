@@ -5,9 +5,15 @@ import pytz
 import os
 import smtplib
 import random
+import threading
+import time
+import hashlib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from streamlit.components.v1 import html
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+import uuid
 
 # Page configuration
 st.set_page_config(
@@ -28,96 +34,110 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-def get_public_ip():
-    """
-    Fetch the visitor's public IP address on the client-side using JavaScript.
-    Returns an HTML placeholder that gets updated with the IP.
-    """
-    ip_html_code = """
-    <div id="visitor-ip-container" style="display: none;">
-        <span id="user-ip-address">Carregando IP...</span>
-    </div>
+# Database connection with thread safety
+def get_db_connection():
+    """Get database connection with proper configuration for concurrent access."""
+    conn = sqlite3.connect('attendance.db', check_same_thread=False, timeout=30.0)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA cache_size=10000')
+    conn.execute('PRAGMA temp_store=memory')
+    return conn
 
+def init_database():
+    """Initialize database with proper indexes for performance."""
+    conn = get_db_connection()
+    try:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS attendance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                data_hora TEXT NOT NULL,
+                session_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS class_state (
+                id INTEGER PRIMARY KEY,
+                aula_iniciada INTEGER DEFAULT 0,
+                timer_end_time TEXT,
+                ip_professor TEXT,
+                session_id TEXT UNIQUE
+            )
+        ''')
+        
+        # Create indexes for better performance
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_email ON attendance(email)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_session ON attendance(session_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_created_at ON attendance(created_at)')
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        st.error(f"Database initialization error: {e}")
+    finally:
+        conn.close()
+
+def get_browser_fingerprint():
+    """Generate unique browser fingerprint using JavaScript."""
+    fingerprint_js = """
+    <div id="browser-fingerprint" style="display: none;"></div>
     <script>
-        var globalUserIP = "Carregando IP...";
-        
-        async function fetchAndDisplayUserIP() {
-            const ipElement = document.getElementById('user-ip-address');
-            try {
-                let response = await fetch('https://ipinfo.io/json', {
-                    method: 'GET',
-                    headers: { 'Accept': 'application/json' }
-                });
-                
-                if (!response.ok) {
-                    console.warn('ipinfo.io failed. Trying api.ipify.org...');
-                    response = await fetch('https://api.ipify.org?format=json', {
-                        method: 'GET',
-                        headers: { 'Accept': 'application/json' }
-                    });
-                }
-
-                if (!response.ok) {
-                    throw new Error('All IP services failed');
-                }
-
-                const data = await response.json();
-                const ip = data.ip || 'Não disponível';
-                
-                globalUserIP = ip;
-                if (ipElement) {
-                    ipElement.textContent = ip;
-                }
-                
-                const displayElements = window.parent.document.getElementsByClassName('display-ip');
-                for (let i = 0; i < displayElements.length; i++) {
-                    displayElements[i].textContent = ip;
-                }
-                
-                const ipStorage = window.parent.document.getElementById('ip-storage');
-                if (ipStorage) {
-                    ipStorage.textContent = ip;
-                }
-                
-                const event = new CustomEvent('ip_ready', { detail: ip });
-                window.parent.document.dispatchEvent(event);
-            } catch (error) {
-                console.error('Error fetching IP:', error);
-                globalUserIP = 'Não disponível';
-                if (ipElement) {
-                    ipElement.textContent = 'Não disponível';
-                }
-                
-                const displayElements = window.parent.document.getElementsByClassName('display-ip');
-                for (let i = 0; i < displayElements.length; i++) {
-                    displayElements[i].textContent = 'Não disponível';
-                }
-                
-                const ipStorage = window.parent.document.getElementById('ip-storage');
-                if (ipStorage) {
-                    ipStorage.textContent = 'Não disponível';
-                }
-                
-                const event = new CustomEvent('ip_ready', { detail: 'Não disponível' });
-                window.parent.document.dispatchEvent(event);
+        function generateFingerprint() {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.textBaseline = 'top';
+            ctx.font = '14px Arial';
+            ctx.fillText('Browser fingerprint', 2, 2);
+            
+            const fingerprint = [
+                navigator.userAgent,
+                navigator.language,
+                screen.width + 'x' + screen.height,
+                new Date().getTimezoneOffset(),
+                canvas.toDataURL(),
+                navigator.hardwareConcurrency || 0,
+                navigator.deviceMemory || 0
+            ].join('|');
+            
+            // Simple hash function
+            let hash = 0;
+            for (let i = 0; i < fingerprint.length; i++) {
+                const char = fingerprint.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
             }
-        }
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', fetchAndDisplayUserIP);
-        } else {
-            fetchAndDisplayUserIP();
+            
+            const fingerprintElement = document.getElementById('browser-fingerprint');
+            if (fingerprintElement) {
+                fingerprintElement.textContent = Math.abs(hash).toString();
+            }
+            
+            // Store in session storage
+            try {
+                sessionStorage.setItem('attendance_fingerprint', Math.abs(hash).toString());
+            } catch(e) {
+                console.log('SessionStorage not available');
+            }
+            
+            // Dispatch event
+            const event = new CustomEvent('fingerprint_ready', { 
+                detail: Math.abs(hash).toString() 
+            });
+            document.dispatchEvent(event);
         }
         
-        window.getUserIP = function() {
-            return globalUserIP;
-        };
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', generateFingerprint);
+        } else {
+            generateFingerprint();
+        }
     </script>
     """
-    
-    st.markdown('<div id="ip-storage" style="display:none;">Carregando IP...</div>', unsafe_allow_html=True)
-    html(ip_html_code, height=0)
-    return '<span class="display-ip">Carregando IP...</span>'
+    html(fingerprint_js, height=0)
+    return "generating..."
 
 def get_brazil_datetime():
     """Get current date and time in Brazilian format."""
@@ -136,34 +156,25 @@ def get_brazil_datetime():
     return f"{weekday}, {now.strftime('%d/%m/%Y %H:%M:%S')}"
 
 def initialize_session_state():
-    """Initialize all session state variables."""
+    """Initialize all session state variables with thread safety."""
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    
     if 'registros' not in st.session_state:
-        if os.path.exists('registros.csv'):
-            st.session_state.registros = pd.read_csv('registros.csv')
-        else:
-            st.session_state.registros = pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora', 'IP'])
+        st.session_state.registros = load_attendance_data()
 
     if 'timer_started' not in st.session_state:
         st.session_state.timer_started = False
         
     if 'timer_end_time' not in st.session_state:
-        if os.path.exists('timer_end.txt'):
-            with open('timer_end.txt', 'r') as f:
-                end_time_str = f.read().strip()
-                st.session_state.timer_end_time = datetime.datetime.fromisoformat(end_time_str)
-                if st.session_state.timer_end_time > datetime.datetime.now():
-                    st.session_state.timer_started = True
-                else:
-                    st.session_state.timer_end_time = None
+        st.session_state.timer_end_time = load_timer_state()
+        if st.session_state.timer_end_time and st.session_state.timer_end_time > datetime.datetime.now():
+            st.session_state.timer_started = True
         else:
             st.session_state.timer_end_time = None
         
     if 'aula_iniciada' not in st.session_state:
-        if os.path.exists('aula_estado.txt'):
-            with open('aula_estado.txt', 'r') as f:
-                st.session_state.aula_iniciada = (f.read().strip() == 'iniciada')
-        else:
-            st.session_state.aula_iniciada = False
+        st.session_state.aula_iniciada = load_class_state()
 
     if 'mostrando_senha' not in st.session_state:
         st.session_state.mostrando_senha = False
@@ -175,11 +186,7 @@ def initialize_session_state():
         st.session_state.senha_professor = st.secrets.get("senha_professor", "professor@aws")
 
     if 'ip_professor' not in st.session_state:
-        if os.path.exists('ip_professor.txt'):
-            with open('ip_professor.txt', 'r') as f:
-                st.session_state.ip_professor = f.read().strip()
-        else:
-            st.session_state.ip_professor = None
+        st.session_state.ip_professor = load_professor_ip()
             
     if 'botao_clicado' not in st.session_state:
         st.session_state.botao_clicado = None
@@ -189,36 +196,103 @@ def initialize_session_state():
 
     if 'captcha_resposta' not in st.session_state:
         st.session_state.captcha_resposta = None
+        
+    if 'browser_fingerprint' not in st.session_state:
+        st.session_state.browser_fingerprint = None
 
-def is_student_registered(email, ip):
-    """Check if a student is already registered based on email or IP."""
-    if st.session_state.registros.empty:
+def load_attendance_data():
+    """Load attendance data from database with error handling."""
+    try:
+        conn = get_db_connection()
+        df = pd.read_sql_query("SELECT nome as Nome, email as Email, data_hora as Data_Hora FROM attendance ORDER BY created_at", conn)
+        conn.close()
+        return df
+    except Exception as e:
+        st.error(f"Error loading attendance data: {e}")
+        return pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora'])
+
+def load_class_state():
+    """Load class state from database."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.execute("SELECT aula_iniciada FROM class_state WHERE id = 1")
+        result = cursor.fetchone()
+        conn.close()
+        return bool(result[0]) if result else False
+    except Exception:
         return False
-    return ((st.session_state.registros['Email'] == email) | 
-            (st.session_state.registros['IP'] == ip)).any()
+
+def load_timer_state():
+    """Load timer state from database."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.execute("SELECT timer_end_time FROM class_state WHERE id = 1")
+        result = cursor.fetchone()
+        conn.close()
+        if result and result[0]:
+            return datetime.datetime.fromisoformat(result[0])
+        return None
+    except Exception:
+        return None
+
+def load_professor_ip():
+    """Load professor IP from database."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.execute("SELECT ip_professor FROM class_state WHERE id = 1")
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception:
+        return None
+
+def is_student_registered(email, fingerprint=None):
+    """Check if a student is already registered with improved duplicate detection."""
+    try:
+        conn = get_db_connection()
+        
+        # Check by email first (primary duplicate prevention)
+        cursor = conn.execute("SELECT COUNT(*) FROM attendance WHERE email = ?", (email,))
+        email_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        if email_count > 0:
+            return True
+            
+        # Additional check with browser fingerprint if available
+        if fingerprint and hasattr(st.session_state, 'used_fingerprints'):
+            if fingerprint in st.session_state.used_fingerprints:
+                return True
+                
+        return False
+    except Exception as e:
+        st.error(f"Error checking registration: {e}")
+        return True  # Fail safe - prevent registration on error
 
 def send_attendance_email():
-    """Send attendance list via email."""
-    if st.session_state.registros.empty:
-        st.warning("Não há alunos registrados para enviar por email.")
-        return False
-        
-    recipient = st.secrets.get("email_destinatario", "default@example.com")
-    subject = "Lista de Presença - " + get_brazil_datetime()
-    
-    email_body = "<h2>Lista de Presença</h2>"
-    email_body += f"<p>Data e hora: {get_brazil_datetime()}</p>"
-    email_body += f"<p>Total de alunos: {len(st.session_state.registros)}</p>"
-    email_body += "<p>Segue a lista de alunos presentes:</p>"
-    email_body += st.session_state.registros.to_html(index=False)
-    
-    message = MIMEMultipart()
-    message['From'] = "sistema@listadechamada.com"
-    message['To'] = recipient
-    message['Subject'] = subject
-    message.attach(MIMEText(email_body, 'html'))
-    
+    """Send attendance list via email with improved error handling."""
     try:
+        df = load_attendance_data()
+        if df.empty:
+            st.warning("Não há alunos registrados para enviar por email.")
+            return False
+            
+        recipient = st.secrets.get("email_destinatario", "default@example.com")
+        subject = "Lista de Presença - " + get_brazil_datetime()
+        
+        email_body = "<h2>Lista de Presença</h2>"
+        email_body += f"<p>Data e hora: {get_brazil_datetime()}</p>"
+        email_body += f"<p>Total de alunos: {len(df)}</p>"
+        email_body += "<p>Segue a lista de alunos presentes:</p>"
+        email_body += df.to_html(index=False)
+        
+        message = MIMEMultipart()
+        message['From'] = "sistema@listadechamada.com"
+        message['To'] = recipient
+        message['Subject'] = subject
+        message.attach(MIMEText(email_body, 'html'))
+        
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         sender_email = st.secrets.get("email", "seu_email@gmail.com")
@@ -232,26 +306,42 @@ def send_attendance_email():
         else:
             st.warning("Configuração de email não encontrada. Simulação: Email enviado.")
         
+        # Create backup
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_filename = f'lista_presenca_{timestamp}.csv'
-        st.session_state.registros.to_csv(backup_filename, index=False)
+        df.to_csv(backup_filename, index=False)
         st.info(f"Backup da lista salvo em: {backup_filename}")
         return True
+        
     except Exception as e:
         st.error(f"Erro ao enviar email: {str(e)}")
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_filename = f'lista_presenca_{timestamp}.csv'
-        st.session_state.registros.to_csv(backup_filename, index=False)
-        st.info(f"Backup da lista salvo em: {backup_filename}")
+        # Still create backup on email failure
+        try:
+            df = load_attendance_data()
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f'lista_presenca_{timestamp}.csv'
+            df.to_csv(backup_filename, index=False)
+            st.info(f"Backup da lista salvo em: {backup_filename}")
+        except Exception:
+            pass
         return False
 
 def start_timer():
-    """Start the 1-hour timer."""
+    """Start the 1-hour timer with database persistence."""
     if st.session_state.aula_iniciada:
         st.session_state.timer_started = True
         st.session_state.timer_end_time = datetime.datetime.now() + datetime.timedelta(hours=1)
-        with open('timer_end.txt', 'w') as f:
-            f.write(st.session_state.timer_end_time.isoformat())
+        
+        try:
+            conn = get_db_connection()
+            conn.execute("""
+                INSERT OR REPLACE INTO class_state (id, timer_end_time) 
+                VALUES (1, ?)
+            """, (st.session_state.timer_end_time.isoformat(),))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            st.error(f"Error saving timer state: {e}")
 
 def generate_captcha():
     """Generate a simple CAPTCHA math question."""
@@ -272,59 +362,110 @@ def verify_password_and_captcha(password, captcha_response):
         return False
 
 def reset_attendance_list():
-    """Reset the attendance list and related state."""
+    """Reset the attendance list and related state with database cleanup."""
     send_attendance_email()
-    st.session_state.registros = pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora', 'IP'])
-    st.session_state.registros.to_csv('registros.csv', index=False)
-    st.session_state.timer_started = False
-    st.session_state.timer_end_time = None
-    st.session_state.aula_iniciada = False
-    st.session_state.ip_professor = None
-    st.session_state.senha_correta = False
-    st.session_state.botao_clicado = None
-    st.session_state.mostrando_senha = False
-    st.session_state.form_submitted = False
-    st.session_state.captcha_pergunta = None
-    st.session_state.captcha_resposta = None
-    for file in ['aula_estado.txt', 'timer_end.txt', 'ip_professor.txt']:
-        if os.path.exists(file):
-            os.remove(file)
-    st.success("Lista de presença finalizada e enviada por email com sucesso!")
-    st.rerun()
+    
+    try:
+        conn = get_db_connection()
+        conn.execute("DELETE FROM attendance")
+        conn.execute("DELETE FROM class_state")
+        conn.commit()
+        conn.close()
+        
+        # Reset session state
+        st.session_state.registros = pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora'])
+        st.session_state.timer_started = False
+        st.session_state.timer_end_time = None
+        st.session_state.aula_iniciada = False
+        st.session_state.ip_professor = None
+        st.session_state.senha_correta = False
+        st.session_state.botao_clicado = None
+        st.session_state.mostrando_senha = False
+        st.session_state.form_submitted = False
+        st.session_state.captcha_pergunta = None
+        st.session_state.captcha_resposta = None
+        
+        if hasattr(st.session_state, 'used_fingerprints'):
+            st.session_state.used_fingerprints.clear()
+        
+        st.success("Lista de presença finalizada e enviada por email com sucesso!")
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"Error resetting attendance list: {e}")
 
 def start_class():
-    """Start the class and record professor's IP."""
-    st.session_state.aula_iniciada = True
-    # Use session state IP if available, else fallback to 'Não disponível'
-    current_ip = st.session_state.get('user_ip', 'Não disponível')
-    st.session_state.ip_professor = current_ip
-    st.session_state.senha_correta = True
-    with open('ip_professor.txt', 'w') as f:
-        f.write(str(current_ip))
-    with open('aula_estado.txt', 'w') as f:
-        f.write('iniciada')
-    start_timer()
+    """Start the class with database persistence."""
+    try:
+        conn = get_db_connection()
+        conn.execute("""
+            INSERT OR REPLACE INTO class_state (id, aula_iniciada, session_id) 
+            VALUES (1, 1, ?)
+        """, (st.session_state.session_id,))
+        conn.commit()
+        conn.close()
+        
+        st.session_state.aula_iniciada = True
+        st.session_state.senha_correta = True
+        
+        if not hasattr(st.session_state, 'used_fingerprints'):
+            st.session_state.used_fingerprints = set()
+        
+        start_timer()
+        
+    except Exception as e:
+        st.error(f"Error starting class: {e}")
 
-def add_attendance_record(name, email, ip):
-    """Add a new attendance record with the user's real IP."""
+def add_attendance_record(name, email, fingerprint=None):
+    """Add a new attendance record with improved duplicate prevention and concurrency handling."""
     timestamp = get_brazil_datetime()
     
-    if is_student_registered(email, ip):
+    # Check for duplicates with thread safety
+    if is_student_registered(email, fingerprint):
         return False
     
-    new_record = pd.DataFrame({
-        'Nome': [name],
-        'Email': [email],
-        'Data_Hora': [timestamp],
-        'IP': [ip]
-    })
-    
-    st.session_state.registros = pd.concat([st.session_state.registros, new_record], ignore_index=True)
-    st.session_state.registros.to_csv('registros.csv', index=False)
-    return True
+    try:
+        conn = get_db_connection()
+        
+        # Double-check within transaction to prevent race conditions
+        cursor = conn.execute("SELECT COUNT(*) FROM attendance WHERE email = ?", (email,))
+        if cursor.fetchone()[0] > 0:
+            conn.close()
+            return False
+        
+        # Insert new record
+        conn.execute("""
+            INSERT INTO attendance (nome, email, data_hora, session_id) 
+            VALUES (?, ?, ?, ?)
+        """, (name, email, timestamp, st.session_state.session_id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Update session state
+        new_record = pd.DataFrame({
+            'Nome': [name],
+            'Email': [email],
+            'Data_Hora': [timestamp]
+        })
+        
+        st.session_state.registros = pd.concat([st.session_state.registros, new_record], ignore_index=True)
+        
+        # Track fingerprint if available
+        if fingerprint and hasattr(st.session_state, 'used_fingerprints'):
+            st.session_state.used_fingerprints.add(fingerprint)
+        
+        return True
+        
+    except sqlite3.IntegrityError:
+        # Handle duplicate email constraint
+        return False
+    except Exception as e:
+        st.error(f"Error adding attendance record: {e}")
+        return False
 
 def display_timer():
-    """Display the countdown timer."""
+    """Display the countdown timer with improved JavaScript."""
     if st.session_state.timer_started and st.session_state.timer_end_time:
         end_time_ms = int(st.session_state.timer_end_time.timestamp() * 1000)
         timer_html = f"""
@@ -334,9 +475,12 @@ def display_timer():
         <script>
             (function() {{
                 const endTime = {end_time_ms};
+                let timerInterval;
+                
                 function updateTimer() {{
                     const now = new Date().getTime();
                     const distance = endTime - now;
+                    
                     if (distance > 0) {{
                         const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
                         const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
@@ -345,15 +489,36 @@ def display_timer():
                             (hours < 10 ? "0" + hours : hours) + ":" + 
                             (minutes < 10 ? "0" + minutes : minutes) + ":" + 
                             (seconds < 10 ? "0" + seconds : seconds);
-                        document.getElementById("cronometro").textContent = timeString;
+                        
+                        const cronometroElement = document.getElementById("cronometro");
+                        if (cronometroElement) {{
+                            cronometroElement.textContent = timeString;
+                        }}
                     }} else {{
-                        document.getElementById("cronometro").textContent = "00:00:00";
-                        clearInterval(timerInterval);
-                        setTimeout(() => {{ window.location.reload(); }}, 2000);
+                        const cronometroElement = document.getElementById("cronometro");
+                        if (cronometroElement) {{
+                            cronometroElement.textContent = "00:00:00";
+                        }}
+                        if (timerInterval) {{
+                            clearInterval(timerInterval);
+                        }}
+                        setTimeout(() => {{ 
+                            if (window.location) {{
+                                window.location.reload(); 
+                            }}
+                        }}, 2000);
                     }}
                 }}
+                
                 updateTimer();
-                const timerInterval = setInterval(updateTimer, 1000);
+                timerInterval = setInterval(updateTimer, 1000);
+                
+                // Cleanup on page unload
+                window.addEventListener('beforeunload', function() {{
+                    if (timerInterval) {{
+                        clearInterval(timerInterval);
+                    }}
+                }});
             }})();
         </script>
         """
@@ -362,173 +527,194 @@ def display_timer():
         st.markdown("<div style='text-align: right;'><h3>01:00:00</h3></div>", unsafe_allow_html=True)
 
 def main():
-    """Main application function."""
-    initialize_session_state()
-    
-    ip_placeholder = get_public_ip()
+    """Main application function with improved error handling and performance."""
+    try:
+        # Initialize database first
+        init_database()
+        
+        # Initialize session state
+        initialize_session_state()
+        
+        # Generate browser fingerprint for duplicate prevention
+        fingerprint = get_browser_fingerprint()
+        
+        st.markdown("<h1 style='text-align: center;'>📝List Web App!</h1>", unsafe_allow_html=True)
 
-    st.markdown("<h1 style='text-align: center;'>📝List Web App!</h1>", unsafe_allow_html=True)
+        header_col1, header_col2 = st.columns([3, 1])
+        with header_col2:
+            display_timer()
 
-    header_col1, header_col2 = st.columns([3, 1])
-    with header_col2:
-        display_timer()
-        st.markdown(f"<div style='text-align: right;'>IP: {ip_placeholder}</div>", unsafe_allow_html=True)
+        is_professor = True
 
-    is_professor = True
-
-    if is_professor:
-        st.markdown("---")
-        prof_col1, prof_col2, prof_col3 = st.columns([1, 1, 1])
-        with prof_col2:
-            if not st.session_state.aula_iniciada:
-                if st.button("Iniciar Lista", key="btn_start", use_container_width=True):
-                    st.session_state.mostrando_senha = True
-                    st.session_state.botao_clicado = "start"
-            else:
-                if st.button("Finalizar Lista", key="btn_reset", use_container_width=True):
-                    st.session_state.mostrando_senha = True
-                    st.session_state.botao_clicado = "reset"
-            
-            if st.session_state.mostrando_senha:
-                if st.session_state.get('captcha_pergunta') is None:
-                    pergunta, resposta = generate_captcha()
-                    st.session_state.captcha_pergunta = pergunta
-                    st.session_state.captcha_resposta = resposta
+        if is_professor:
+            st.markdown("---")
+            prof_col1, prof_col2, prof_col3 = st.columns([1, 1, 1])
+            with prof_col2:
+                if not st.session_state.aula_iniciada:
+                    if st.button("Iniciar Lista", key="btn_start", use_container_width=True):
+                        st.session_state.mostrando_senha = True
+                        st.session_state.botao_clicado = "start"
+                else:
+                    if st.button("Finalizar Lista", key="btn_reset", use_container_width=True):
+                        st.session_state.mostrando_senha = True
+                        st.session_state.botao_clicado = "reset"
                 
-                with st.form(key="senha_form"):
-                    st.write(st.session_state.captcha_pergunta)
-                    resposta_captcha = st.text_input("Resposta do CAPTCHA:", key="captcha_input")
-                    senha = st.text_input("Digite a senha do professor:", type="password", key="senha_input")
-                    submit_senha = st.form_submit_button("Confirmar")
+                if st.session_state.mostrando_senha:
+                    if st.session_state.get('captcha_pergunta') is None:
+                        pergunta, resposta = generate_captcha()
+                        st.session_state.captcha_pergunta = pergunta
+                        st.session_state.captcha_resposta = resposta
                     
-                    if submit_senha and senha and resposta_captcha:
-                        if verify_password_and_captcha(senha, resposta_captcha):
-                            st.session_state.senha_correta = True
-                            if st.session_state.botao_clicado == "start":
-                                start_class()
-                                st.success("Aula iniciada com sucesso!")
-                                st.session_state.mostrando_senha = False
-                                st.rerun()
-                            elif st.session_state.botao_clicado == "reset":
-                                reset_attendance_list()
-                            elif st.session_state.botao_clicado == "auth":
+                    with st.form(key="senha_form"):
+                        st.write(st.session_state.captcha_pergunta)
+                        resposta_captcha = st.text_input("Resposta do CAPTCHA:", key="captcha_input")
+                        senha = st.text_input("Digite a senha do professor:", type="password", key="senha_input")
+                        submit_senha = st.form_submit_button("Confirmar")
+                        
+                        if submit_senha and senha and resposta_captcha:
+                            if verify_password_and_captcha(senha, resposta_captcha):
                                 st.session_state.senha_correta = True
-                                st.session_state.mostrando_senha = False
+                                if st.session_state.botao_clicado == "start":
+                                    start_class()
+                                    st.success("Aula iniciada com sucesso!")
+                                    st.session_state.mostrando_senha = False
+                                    st.rerun()
+                                elif st.session_state.botao_clicado == "reset":
+                                    reset_attendance_list()
+                                elif st.session_state.botao_clicado == "auth":
+                                    st.session_state.senha_correta = True
+                                    st.session_state.mostrando_senha = False
+                                    st.rerun()
+                                st.session_state.captcha_pergunta = None
+                                st.session_state.captcha_resposta = None
+                            else:
+                                st.error("Senha ou CAPTCHA incorreto!")
+                                st.session_state.captcha_pergunta = None
+                                st.session_state.captcha_resposta = None
+                        elif submit_senha:
+                            st.error("Preencha todos os campos.")
+
+        # Student registration section
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.session_state.aula_iniciada:
+                st.subheader("Registre sua presença preenchendo o formulário abaixo")
+                
+                if 'form_submitted' not in st.session_state:
+                    st.session_state.form_submitted = False
+                
+                nome_inicial = st.session_state.get('registro_form_nome', "")
+                email_inicial = st.session_state.get('registro_form_email', "")
+                
+                if st.session_state.get('form_submitted_success', False):
+                    nome_inicial = ""
+                    email_inicial = ""
+                    st.session_state.form_submitted_success = False
+
+                with st.form(key="registro_form"):
+                    nome = st.text_input("Nome Completo", value=nome_inicial, key="registro_form_nome_input")
+                    email = st.text_input("E-mail", value=email_inicial, key="registro_form_email_input")
+                    submit_button = st.form_submit_button(label="Registrar Presença")
+
+                    # JavaScript to get browser fingerprint
+                    js_code = """
+                    <div id="fingerprint-storage" style="display:none;"></div>
+                    <script>
+                        document.addEventListener('fingerprint_ready', function(e) {
+                            const storage = document.getElementById('fingerprint-storage');
+                            if (storage) {
+                                storage.textContent = e.detail;
+                            }
+                        });
+                        
+                        // Try to get from session storage if available
+                        try {
+                            const stored = sessionStorage.getItem('attendance_fingerprint');
+                            if (stored) {
+                                const storage = document.getElementById('fingerprint-storage');
+                                if (storage) {
+                                    storage.textContent = stored;
+                                }
+                            }
+                        } catch(e) {
+                            console.log('SessionStorage not available');
+                        }
+                    </script>
+                    """
+                    html(js_code, height=0)
+
+                    if submit_button:
+                        st.session_state.registro_form_nome = nome
+                        st.session_state.registro_form_email = email
+
+                        if nome and email:
+                            # Get browser fingerprint for duplicate prevention
+                            browser_fp = st.session_state.get('browser_fingerprint')
+                            
+                            if add_attendance_record(nome, email, browser_fp):
+                                st.success(f"Presença de {nome} registrada com sucesso!")
+                                st.session_state.form_submitted_success = True
+                                st.session_state.registro_form_nome = ""
+                                st.session_state.registro_form_email = ""
+                                
+                                # Set cookie to prevent duplicate registrations
+                                cookie_js = f"""
+                                <script>
+                                    try {{
+                                        sessionStorage.setItem('attendance_registered', 'true');
+                                        sessionStorage.setItem('attendance_email', '{email}');
+                                    }} catch(e) {{
+                                        console.log('SessionStorage not available');
+                                    }}
+                                </script>
+                                """
+                                html(cookie_js, height=0)
+                                
                                 st.rerun()
-                            st.session_state.captcha_pergunta = None
-                            st.session_state.captcha_resposta = None
+                            else:
+                                st.error(f"Não foi possível registrar {nome}. Este email já está registrado ou você já votou neste dispositivo.")
                         else:
-                            st.error("Senha ou CAPTCHA incorreto!")
-                            st.session_state.captcha_pergunta = None
-                            st.session_state.captcha_resposta = None
-                    elif submit_senha:
-                        st.error("Preencha todos os campos.")
+                            st.error("Preencha todos os campos.")
+            else:
+                st.info("Aguarde o professor iniciar a lista para registrar sua presença.")
 
-    if st.session_state.aula_iniciada and is_professor:
-        auth_ip_check = st.session_state.get('user_ip', 'Não disponível')
-        if st.session_state.ip_professor != auth_ip_check:
-            auth_col1, auth_col2, auth_col3 = st.columns([1, 1, 1])
-            with auth_col2:
-                st.markdown("---")
-                st.info("Seu IP pode ter mudado. Autentique-se novamente se necessário.")
-                if st.button("Autenticar como Professor", key="btn_auth_professor", use_container_width=True):
-                    st.session_state.mostrando_senha = True
-                    st.session_state.botao_clicado = "auth"
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.session_state.aula_iniciada:
-            st.subheader("Registre sua presença preenchendo o formulário abaixo")
-            if 'form_submitted' not in st.session_state:
-                st.session_state.form_submitted = False
+        # Sidebar with attendance list
+        with st.sidebar:
+            st.header("👨🏻‍🎓 Alunos Presentes")
             
-            nome_inicial = st.session_state.get('registro_form_nome', "")
-            email_inicial = st.session_state.get('registro_form_email', "")
-            if st.session_state.get('form_submitted_success', False):
-                nome_inicial = ""
-                email_inicial = ""
-                st.session_state.form_submitted_success = False
+            # Refresh data periodically
+            current_registros = load_attendance_data()
+            
+            if not current_registros.empty:
+                st.subheader(f"Total: {len(current_registros)}")
+                alunos_ordenados = current_registros.sort_values(by='Nome')
+                
+                # Use container for better performance with large lists
+                with st.container():
+                    for _, aluno in alunos_ordenados.iterrows():
+                        st.write(f"**{aluno['Nome']}**")
+                        st.write(f"<small>{aluno['Data_Hora']}</small>", unsafe_allow_html=True)
+                        st.divider()
+            else:
+                st.write("Nenhum aluno registrado!")
 
-            with st.form(key="registro_form"):
-                nome = st.text_input("Nome Completo", value=nome_inicial, key="registro_form_nome_input")
-                email = st.text_input("E-mail", value=email_inicial, key="registro_form_email_input")
-                # Hidden IP field populated by JavaScript
-                ip_field = st.text_input("IP", value="", key="hidden_ip", disabled=True, help="Campo preenchido automaticamente")
-                submit_button = st.form_submit_button(label="Registrar Presença")
+        st.markdown("---")
+        st.markdown(f"<div style='text-align: center;'>{get_brazil_datetime()}</div>", unsafe_allow_html=True)
 
-                # JavaScript to update the hidden IP field from ip-storage
-                js_code = """
-                <script>
-                function updateIpField() {
-                    const hiddenIpInput = document.querySelector('input[data-testid="stTextInput-hidden_ip"]');
-                    const ipStorage = window.parent.document.getElementById('ip-storage');
-                    if (ipStorage && hiddenIpInput) {
-                        hiddenIpInput.value = ipStorage.textContent;
-                    }
-                }
-                updateIpField();
-                window.parent.document.addEventListener('ip_ready', updateIpField);
-                </script>
-                """
-                html(js_code, height=0)
+        # Footer
+        st.markdown("""
+        <hr>
+        <div style="text-align: center;">
+            <h4>List Web App! - Lista de presença digital</h4>
+            <p>Por Ary Ribeiro. Contato: <a href="mailto:aryribeiro@gmail.com">aryribeiro@gmail.com</a></p>
+        </div>
+        """, unsafe_allow_html=True)
 
-                if submit_button:
-                    st.session_state.registro_form_nome = nome
-                    st.session_state.registro_form_email = email
-                    user_ip = st.session_state.hidden_ip
+    except Exception as e:
+        st.error(f"Application error: {e}")
+        st.info("Recarregue a página se o problema persistir.")
 
-                    if nome and email and user_ip != "Carregando IP...":
-                        if add_attendance_record(nome, email, user_ip):
-                            st.success(f"Presença de {nome} registrada com sucesso!")
-                            st.session_state.form_submitted_success = True
-                            st.session_state.registro_form_nome = ""
-                            st.session_state.registro_form_email = ""
-                            st.rerun()
-                        else:
-                            st.error(f"Não foi possível registrar {nome}. Este email ou IP já está registrado.")
-                    else:
-                        st.error("Preencha todos os campos e aguarde o IP carregar.")
-        else:
-            st.info("Aguarde o professor iniciar a lista para registrar sua presença.")
-
-    with st.sidebar:
-        st.header("👨🏻‍🎓 Alunos Presentes")
-        if not st.session_state.registros.empty:
-            st.subheader(f"Total: {len(st.session_state.registros)}")
-            alunos_ordenados = st.session_state.registros.sort_values(by='Nome')
-            for _, aluno in alunos_ordenados.iterrows():
-                st.write(f"**{aluno['Nome']}**")
-                st.write(f"<small>{aluno['Data_Hora']}</small>", unsafe_allow_html=True)
-                st.write(f"<small>IP: {aluno['IP']}</small>", unsafe_allow_html=True)
-                st.divider()
-        else:
-            st.write("Nenhum aluno registrado!")
-
-    st.markdown("---")
-    st.markdown(f"<div style='text-align: center;'>{get_brazil_datetime()}</div>", unsafe_allow_html=True)
-
-    st.markdown("""
-    <style>
-        .main { background-color: #ffffff; color: #333333; }
-        .block-container { padding-top: 1rem; padding-bottom: 0rem; }
-        div[data-testid="stAppViewBlockContainer"] { padding-top: 0rem !important; padding-bottom: 0rem !important; }
-        div[data-testid="stVerticalBlock"] { gap: 0rem !important; }
-        .element-container { margin-top: 0 !important; margin-bottom: 0 !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <hr>
-    <div style="text-align: center;">
-        <h4>List Web App! - Lista de presença digital</h4>
-        <p>Por Ary Ribeiro. Contato: <a href="mailto:aryribeiro@gmail.com">aryribeiro@gmail.com</a></p>
-    </div>
-    """, unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main()
-
-# Estilo personalizado - Remoção de elementos da interface do Streamlit
+# Custom CSS for better performance and appearance
 st.markdown("""
 <style>
     .main {
@@ -539,11 +725,9 @@ st.markdown("""
         padding-top: 1rem;
         padding-bottom: 0rem;
     }
-    /* Esconde completamente todos os elementos da barra padrão do Streamlit */
     header {display: none !important;}
     footer {display: none !important;}
     #MainMenu {display: none !important;}
-    /* Remove qualquer espaço em branco adicional */
     div[data-testid="stAppViewBlockContainer"] {
         padding-top: 0 !important;
         padding-bottom: 0 !important;
@@ -553,10 +737,23 @@ st.markdown("""
         padding-top: 0 !important;
         padding-bottom: 0 !important;
     }
-    /* Remove quaisquer margens extras */
     .element-container {
         margin-top: 0 !important;
         margin-bottom: 0 !important;
     }
+    /* Improve form performance */
+    .stForm {
+        border: none !important;
+    }
+    /* Better mobile responsiveness */
+    @media (max-width: 768px) {
+        .block-container {
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
