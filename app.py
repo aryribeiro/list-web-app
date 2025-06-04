@@ -65,7 +65,7 @@ def init_database():
                aula_iniciada INTEGER DEFAULT 0,
                timer_end_time TEXT,
                ip_professor TEXT,
-               session_id TEXT
+               session_id TEXT UNIQUE
            )
        ''')
        
@@ -166,7 +166,7 @@ def initialize_session_state():
        else:
            st.session_state.timer_end_time = None
        
-   # FIX: Sempre recarregar o estado da aula do banco de dados
+   # FIX: Always reload class state from database to ensure consistency across sessions
    st.session_state.aula_iniciada = load_class_state()
 
    if 'mostrando_senha' not in st.session_state:
@@ -205,30 +205,20 @@ def load_attendance_data():
        return pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora'])
 
 def load_class_state():
-   """Load class state from database - FIX: Verificar se a aula realmente está ativa."""
+   """Load class state from database with proper error handling."""
    try:
        conn = get_db_connection()
-       cursor = conn.execute("SELECT aula_iniciada, timer_end_time FROM class_state WHERE id = 1")
+       cursor = conn.execute("SELECT aula_iniciada FROM class_state WHERE id = 1")
        result = cursor.fetchone()
        conn.close()
-       
-       if result:
-           aula_iniciada = bool(result[0])
-           timer_end_time_str = result[1]
-           
-           # Verificar se o timer ainda está válido
-           if aula_iniciada and timer_end_time_str:
-               try:
-                   timer_end_time = datetime.datetime.fromisoformat(timer_end_time_str)
-                   # Se o timer expirou, a aula não está mais ativa
-                   if timer_end_time <= datetime.datetime.now():
-                       return False
-               except:
-                   return False
-           
-           return aula_iniciada
-       return False
-   except Exception:
+       # FIX: Ensure we return the actual database state
+       if result is not None:
+           return bool(result[0])
+       else:
+           # If no record exists, class is not started
+           return False
+   except Exception as e:
+       # On error, assume class is not started for safety
        return False
 
 def load_timer_state():
@@ -239,11 +229,7 @@ def load_timer_state():
        result = cursor.fetchone()
        conn.close()
        if result and result[0]:
-           timer_end = datetime.datetime.fromisoformat(result[0])
-           # Se o timer expirou, retornar None
-           if timer_end <= datetime.datetime.now():
-               return None
-           return timer_end
+           return datetime.datetime.fromisoformat(result[0])
        return None
    except Exception:
        return None
@@ -348,8 +334,7 @@ def start_timer():
        try:
            conn = get_db_connection()
            conn.execute("""
-               INSERT OR REPLACE INTO class_state (id, aula_iniciada, timer_end_time) 
-               VALUES (1, 1, ?)
+               UPDATE class_state SET timer_end_time = ? WHERE id = 1
            """, (st.session_state.timer_end_time.isoformat(),))
            conn.commit()
            conn.close()
@@ -408,27 +393,25 @@ def reset_attendance_list():
        st.error(f"Error resetting attendance list: {e}")
 
 def start_class():
-   """Start the class with database persistence - FIX: Garantir que o estado seja persistido corretamente."""
+   """Start the class with database persistence."""
    try:
-       # Primeiro define o timer
-       timer_end_time = datetime.datetime.now() + datetime.timedelta(hours=1)
-       
        conn = get_db_connection()
+       # FIX: Use INSERT OR REPLACE to ensure the record is properly created/updated
        conn.execute("""
-           INSERT OR REPLACE INTO class_state (id, aula_iniciada, timer_end_time, session_id) 
-           VALUES (1, 1, ?, ?)
-       """, (timer_end_time.isoformat(), st.session_state.session_id))
+           INSERT OR REPLACE INTO class_state (id, aula_iniciada, session_id) 
+           VALUES (1, 1, ?)
+       """, (st.session_state.session_id,))
        conn.commit()
        conn.close()
        
-       # Atualiza o estado da sessão
+       # FIX: Update session state immediately after database update
        st.session_state.aula_iniciada = True
        st.session_state.senha_correta = True
-       st.session_state.timer_started = True
-       st.session_state.timer_end_time = timer_end_time
        
        if not hasattr(st.session_state, 'used_fingerprints'):
            st.session_state.used_fingerprints = set()
+       
+       start_timer()
        
    except Exception as e:
        st.error(f"Error starting class: {e}")
@@ -552,6 +535,17 @@ def main():
        # Initialize session state
        initialize_session_state()
        
+       # FIX: Force refresh of class state on each page load to ensure consistency
+       current_class_state = load_class_state()
+       if current_class_state != st.session_state.aula_iniciada:
+           st.session_state.aula_iniciada = current_class_state
+           # Also reload timer state if class is active
+           if current_class_state:
+               timer_state = load_timer_state()
+               if timer_state and timer_state > datetime.datetime.now():
+                   st.session_state.timer_end_time = timer_state
+                   st.session_state.timer_started = True
+       
        # Generate browser fingerprint for duplicate prevention
        fingerprint = get_browser_fingerprint()
        
@@ -595,6 +589,8 @@ def main():
                                    start_class()
                                    st.success("Aula iniciada com sucesso!")
                                    st.session_state.mostrando_senha = False
+                                   # FIX: Add small delay to ensure database write completes
+                                   time.sleep(0.1)
                                    st.rerun()
                                elif st.session_state.botao_clicado == "reset":
                                    reset_attendance_list()
@@ -614,7 +610,10 @@ def main():
        # Student registration section
        col1, col2, col3 = st.columns([1, 1, 1])
        with col2:
-           if st.session_state.aula_iniciada:
+           # FIX: Check class state directly from database for real-time status
+           current_class_active = load_class_state()
+           
+           if current_class_active:
                st.subheader("Registre sua presença preenchendo o formulário abaixo")
                
                if 'form_submitted' not in st.session_state:
