@@ -703,46 +703,50 @@ def main():
        st.error(f"Application error: {e}")
        st.info("Recarregue a página se o problema persistir.")
 
-# Custom CSS for better performance and appearance
-st.markdown("""
-<style>
-   .main {
-       background-color: #ffffff;
-       color: #333333;
-   }
-   .block-container {
-       padding-top: 1rem;
-       padding-bottom: 0rem;
-   }
-   header {display: none !important;}
-   footer {display: none !important;}
-   #MainMenu {display: none !important;}
-   div[data-testid="stAppViewBlockContainer"] {
-       padding-top: 0 !important;
-       padding-bottom: 0 !important;
-   }
-   div[data-testid="stVerticalBlock"] {
-       gap: 0 !important;
-       padding-top: 0 !important;
-       padding-bottom: 0 !important;
-   }
-   .element-container {
-       margin-top: 0 !important;
-       margin-bottom: 0 !important;
-   }
-   /* Improve form performance */
-   .stForm {
-       border: none !important;
-   }
-   /* Better mobile responsiveness */
-   @media (max-width: 768px) {
-       .block-container {
-           padding-left: 1rem;
-           padding-right: 1rem;
-       }
-   }
-</style>
-""", unsafe_allow_html=True)
-
 if __name__ == "__main__":
    main()
+
+st.markdown("""
+<style>
+    .main {
+        background-color: #ffffff;
+        color: #333333;
+    }
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 0rem;
+    }
+    /* Esconde o menu principal e footer, MAS mantém o botão do sidebar */
+    #MainMenu {visibility: hidden !important;}
+    footer {visibility: hidden !important;}
+    
+    /* Mantém o botão de toggle do sidebar visível */
+    button[kind="header"] {
+        display: block !important;
+        visibility: visible !important;
+    }
+    
+    /* Remove qualquer espaço em branco adicional */
+    div[data-testid="stAppViewBlockContainer"] {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    div[data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    /* Remove quaisquer margens extras */
+    .element-container {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+    }
+    
+    /* Garante que o header com o botão do sidebar fique visível */
+    header[data-testid="stHeader"] {
+        display: block !important;
+        visibility: visible !important;
+        background-color: transparent !important;
+    }
+</style>
+""", unsafe_allow_html=True)
