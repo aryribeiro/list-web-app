@@ -3,7 +3,7 @@ Obs.: caso o app esteja no modo "sleeping" (dormindo) ao entrar, basta clicar no
 
 # 📝 List Web App - Sistema de Lista de Presença Digital
 
-List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamento digital e simplificado de listas de presença. Ideal para aulas, eventos ou qualquer situação que necessite de um controle de participação ágil e com registro automatizado. A aplicação permite que um professor inicie e finalize a coleta de presenças, enquanto os participantes podem registrar sua presença de forma individual. Ao final, a lista é enviada por e-mail e um backup é salvo..
+List Web App é uma aplicação web desenvolvida em Python e Streamlit para o gerenciamento digital e simplificado de listas de presença. Ideal para aulas, eventos ou qualquer situação que necessite de um controle de participação ágil e com registro automatizado. A aplicação permite que um professor inicie e finalize a coleta de presenças, enquanto os participantes podem registrar sua presença de forma individual. Ao final, a lista é enviada por e-mail e um backup é salvo..
 
 ## ✨ Funcionalidades Principais
 
@@ -108,7 +108,7 @@ List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamen
 
 A aplicação utiliza arquivos locais para persistir dados entre sessões:
 
-* `registros.csv`: Armazena os dados de todos os alunos que registraram presença (Nome, Email, Data/Hora do registro, IP).
+* `registros.csv`: Armazena os dados de todos os alunos que registraram presença (Nome, Email, Data/Hora do registro).
 * `aula_estado.txt`: Indica se a aula está 'iniciada' ou não.
 * `timer_end.txt`: Guarda a data e hora exatas em que o cronômetro de presença deve terminar.
 * `ip_professor.txt`: Armazena o IP público do professor que iniciou a aula.
