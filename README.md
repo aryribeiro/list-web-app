@@ -3,45 +3,43 @@ Obs.: caso o app esteja no modo "sleeping" (dormindo) ao entrar, basta clicar no
 
 # 📝 List Web App - Sistema de Lista de Presença Digital
 
-List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamento digital e simplificado de listas de presença. Ideal para aulas, eventos ou qualquer situação que necessite de um controle de participação ágil e com registro automatizado. A aplicação permite que um professor inicie e finalize a coleta de presenças, enquanto os participantes podem registrar sua presença de forma individual. Ao final, a lista é enviada por e-mail e um backup é salvo..
+List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamento digital de listas de presença. Ideal para aulas, eventos ou qualquer situação que necessite de controle de participação ágil, com proteção contra registros fraudulentos e envio automatizado por e-mail. O professor autentica-se, inicia a lista e um cronômetro de 1 hora começa a contar; os alunos registram a própria presença (uma única vez, validada por IP público e sessão). Ao fim do tempo — ou quando o professor finalizar manualmente — a lista é enviada por e-mail com o CSV em anexo e um backup é salvo localmente.
 
 ## ✨ Funcionalidades Principais
 
-* **Autenticação do Professor:** Acesso seguro às funções administrativas (iniciar/finalizar lista) através de senha e um sistema de CAPTCHA simples para maior segurança.
-* **Registro de Alunos/Participantes:** Formulário intuitivo para os participantes registrarem Nome Completo e E-mail.
-* **Identificação Única:** Evita duplicidade de registros verificando E-mail e/IP do participante.
-* **Temporizador (Cronômetro):** Um cronômetro de 1 hora é iniciado quando a lista é aberta, indicando o tempo restante para registro.
-* **Notificação por E-mail:** Ao finalizar a lista, um e-mail com a relação de presentes (em formato HTML) é enviado para um destinatário configurado.
-* **Backup Automático:** Uma cópia da lista de presença em formato CSV é gerada e salva localmente ao finalizar e enviar o e-mail.
-* **Persistência de Dados:**
-    * Registros de presença são salvos em `registros.csv`.
-    * O estado da aula (iniciada/não iniciada), o IP do professor e o tempo final do cronômetro são persistidos em arquivos de texto (`aula_estado.txt`, `ip_professor.txt`, `timer_end.txt`) para permitir a recuperação do estado em caso de reinicialização da aplicação.
-* **Interface Limpa e Responsiva:** Layout organizado utilizando colunas e a barra lateral do Streamlit para visualização dos presentes. Estilos personalizados para uma experiência de usuário aprimorada.
-* **Informações em Tempo Real:** Exibição do IP público do usuário e data/hora atual formatada para o padrão brasileiro (com fuso horário de São Paulo).
-* **Configuração Segura:** Utiliza o sistema de `secrets` do Streamlit para gerenciar credenciais sensíveis (senha do professor, dados de e-mail).
+* **Área do professor protegida:** os controles administrativos ficam ocultos dos alunos. O professor autentica-se uma vez por sessão (senha + CAPTCHA) no expander "🔑 Área do professor" e então pode iniciar/finalizar a lista sem redigitar a senha a cada ação.
+* **Registro individual com trava anti-fraude:** cada aluno registra apenas a própria presença, **uma única vez**. O bloqueio de duplicidade combina três verificações: e-mail (normalizado, insensível a maiúsculas), sessão do navegador e **IP público do aluno** (obtido via `st.context.ip_address` — o IP do cliente conectado, nunca o do servidor).
+* **Registro manual pelo professor:** para alunos presentes que tiveram travamentos ou problemas de rede/dispositivo, o professor autenticado pode registrá-los manualmente (expander "👨‍🏫 Registro manual pelo professor"). Esses registros ficam auditados no banco como `registrado_por = 'professor'` e aparecem com IP "registro manual" na lista.
+* **Cronômetro com duração configurável e finalização automática:** antes de iniciar a lista, o professor escolhe a duração — **15 min, 30 min, 1 hora (padrão), 2 horas ou 4 horas**. Quando o tempo termina, a lista **fecha sozinha e o e-mail é enviado automaticamente**, sem intervenção do professor. Um mecanismo atômico no banco garante que apenas uma sessão execute o envio, mesmo com vários alunos conectados no momento da expiração.
+* **E-mail com CSV em anexo:** ao finalizar (manual ou automaticamente), o destinatário configurado recebe um e-mail com a lista em HTML no corpo **e o arquivo CSV em anexo** (UTF-8 com BOM, compatível com Excel). Corpo e CSV vêm em **ordem alfabética** (ignorando maiúsculas/acentos), com Nome, E-mail, **IP público** e Data/Hora de cada registro.
+* **Comprovante automático para o aluno:** assim que a presença é registrada (e o nome aparece na barra lateral), o aluno recebe automaticamente um **e-mail comprovante** com nome, e-mail e data/hora do registro — um "recibo" que dá segurança de que a presença foi computada. O envio passa por uma **fila persistente no SQLite (estilo AWS SQS)** consumida por um worker em segundo plano: com vários alunos registrando ao mesmo tempo, os e-mails entram em fila (com até 5 retentativas em caso de falha de SMTP) e **nunca atrasam ou travam o registro de presença**. Registros manuais feitos pelo professor também geram comprovante ao aluno.
+* **Backup automático:** o mesmo CSV é salvo localmente (`lista_presenca_YYYYMMDD_HHMMSS.csv`) a cada finalização, inclusive se o envio do e-mail falhar.
+* **Sidebar em tempo real:** a lista de presentes na barra lateral atualiza automaticamente a cada 5 segundos (via `st.fragment`) para todos os conectados, em ordem alfabética, com data e hora de cada registro. O aluno vê o próprio nome imediatamente após registrar.
+* **Preparado para acessos simultâneos:** SQLite em modo WAL (leituras e escritas concorrentes), verificação de duplicados dentro da transação + constraint UNIQUE (dois registros simultâneos do mesmo e-mail: só um vence), finalização automática com trava atômica (um único envio mesmo com várias sessões abertas) e fila de comprovantes fora do caminho do registro.
+* **Persistência em SQLite:** todos os dados (presenças, estado da aula, cronômetro e fila de comprovantes) ficam em `attendance.db` com modo WAL. O esquema é criado/migrado automaticamente na inicialização.
+* **Data/hora no fuso de São Paulo**, formatada no padrão brasileiro com dia da semana.
 
 ## 🚀 Tecnologias Utilizadas
 
 * **Python 3.x**
-* **Streamlit:** Framework principal para a construção da interface web.
-* **Pandas:** Para manipulação e armazenamento dos dados da lista de presença.
-* **Requests:** Para obter o endereço IP público.
-* **Pytz:** Para manipulação de fusos horários.
-* **SMTPLib & Email Mime:** Para o envio de e-mails.
-* **HTML/CSS/JavaScript:** Para customizações de interface e o cronômetro.
+* **Streamlit ≥ 1.45** — interface web, `st.context.ip_address` (IP do cliente) e `st.fragment` (atualização em tempo real)
+* **SQLite (WAL)** — persistência com acesso concorrente
+* **Pandas** — manipulação da lista e geração do CSV
+* **Pytz** — fuso horário de São Paulo
+* **SMTPLib & Email MIME** — envio do e-mail com anexo
+* **HTML/CSS/JavaScript** — cronômetro e customizações de interface
 
 ## 🔧 Pré-requisitos
 
-* Python 3.7 ou superior
+* Python 3.9 ou superior
 * pip (gerenciador de pacotes Python)
 
 ## ⚙️ Configuração e Instalação
 
 1.  **Clone o repositório (ou copie os arquivos):**
     ```bash
-    # Se estiver usando git
     git clone <url_do_seu_repositorio>
-    cd <nome_do_seu_repositorio>
+    cd list-web-app
     ```
 
 2.  **Crie e ative um ambiente virtual (recomendado):**
@@ -53,76 +51,62 @@ List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamen
     source venv/bin/activate
     ```
 
-3.  **Instale as dependências do requirements.txt:**
-    
-    streamlit
-    pandas
-    requests
-    pytz
-    
+3.  **Instale as dependências:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
 4.  **Configure os Segredos (`secrets.toml`):**
-    Crie um arquivo chamado `.secrets.toml` na pasta `.streamlit` dentro do diretório do seu projeto (`seu_projeto/.streamlit/secrets.toml`). Adicione o seguinte conteúdo, substituindo pelos seus dados:
+    Crie o arquivo `.streamlit/secrets.toml` na pasta do projeto:
 
     ```toml
     # .streamlit/secrets.toml
 
-    # Senha para o professor acessar as funcionalidades de iniciar/finalizar lista
+    # Senha para o professor acessar a área administrativa
     senha_professor = "sua_senha_super_secreta"
 
     # E-mail para onde a lista de presença será enviada
     email_destinatario = "professor@exemplo.com"
 
-    # Configurações para envio de e-mail via Gmail
-    # E-mail do remetente (conta Gmail que enviará a lista)
+    # Conta Gmail remetente e senha de aplicativo
+    # (como gerar: https://support.google.com/accounts/answer/185833)
     email = "seu_email_gmail@gmail.com"
-    # Senha de aplicativo gerada para o e-mail acima.
-    # Veja como gerar: [https://support.google.com/accounts/answer/185833](https://support.google.com/accounts/answer/185833)
     senha_email = "sua_senha_de_aplicativo_do_gmail"
     ```
-    *Se você não configurar `email` e `senha_email`, a aplicação irá simular o envio e alertar sobre a necessidade de configuração para envios reais.*
+
+    * **Senha padrão:** se `senha_professor` não for configurada, a senha do professor é **`admin123`**. Em produção (Streamlit Cloud), defina sempre a sua própria senha nos *secrets*/variáveis de ambiente do app — ela sobrescreve o padrão.
+    * Se `email` e `senha_email` não forem configurados, a aplicação simula os envios (lista final e comprovantes) e ainda assim salva o backup CSV local.
 
 ## ▶️ Como Usar
 
 1.  **Execute a aplicação:**
-    Navegue até o diretório raiz do projeto no terminal e execute:
     ```bash
-    streamlit run seu_arquivo_python.py
+    streamlit run app.py
     ```
-    (Substitua `seu_arquivo_python.py` pelo nome do seu arquivo principal, ex: `app.py`).
 
-2.  **Para o Professor:**
-    * Ao acessar a aplicação, se a lista não estiver iniciada, clique em "Iniciar Lista".
-    * Digite a `senha_professor` configurada no `secrets.toml` e resolva o CAPTCHA.
-    * Após a autenticação, a lista é iniciada, o cronômetro começa, e os alunos podem registrar a presença.
-    * O IP do professor é registrado para ajudar na identificação em sessões futuras (embora a senha seja o principal fator de autenticação).
-    * Para encerrar, clique em "Finalizar Lista", autentique-se novamente. A lista de presença será enviada por e-mail, um backup salvo, e os dados da sessão atual serão limpos.
+2.  **Professor:**
+    * Abra o expander **"🔑 Área do professor"**, resolva o CAPTCHA e informe a senha. A autenticação vale para toda a sessão.
+    * Escolha a **duração da lista** (15 min a 4 horas; padrão 1 hora) e clique em **"Iniciar Lista"** — o cronômetro começa e os alunos já podem registrar presença.
+    * Se algum aluno presente não conseguir registrar (problema técnico), use o **"Registro manual pelo professor"**.
+    * Para encerrar antes do prazo, clique em **"Finalizar Lista"**. Caso contrário, ao fim da 1 hora a lista fecha e envia o e-mail **automaticamente**.
 
-3.  **Para o Aluno/Participante:**
-    * Acesse a URL da aplicação.
-    * Se a lista estiver iniciada pelo professor, um formulário para "Nome Completo" e "E-mail" estará disponível.
-    * Preencha os dados e clique em "Registrar Presença".
-    * Uma mensagem de sucesso ou erro (caso já registrado ou campos vazios) será exibida.
-    * Os nomes dos alunos presentes são exibidos na barra lateral, ordenados alfabeticamente.
+3.  **Aluno/Participante:**
+    * Acesse a URL da aplicação com a lista iniciada, preencha Nome Completo e E-mail e clique em **"Registrar Presença"**.
+    * O registro é único: e-mail, sessão e IP público repetidos são bloqueados.
+    * Seu nome aparece imediatamente na barra lateral, com data e hora, em ordem alfabética — e um **e-mail comprovante** é enviado automaticamente para você.
+    * Guie-se pela contagem regressiva no topo (com a duração definida pelo professor) — ao chegar em 00:00:00 a lista fecha sozinha.
 
 ## 🗂️ Persistência de Dados
 
-A aplicação utiliza arquivos locais para persistir dados entre sessões:
+* `attendance.db` — banco SQLite (modo WAL) com as tabelas:
+    * `attendance`: nome, e-mail, data/hora, sessão, **IP público** e origem do registro (`aluno` ou `professor`);
+    * `class_state`: estado da aula e horário-limite do cronômetro;
+    * `email_queue`: fila de comprovantes (status `pendente`/`enviado`/`falhou`, com contagem de tentativas).
+* `lista_presenca_YYYYMMDD_HHMMSS.csv` — backup gerado a cada finalização (o mesmo arquivo enviado como anexo do e-mail).
 
-* `registros.csv`: Armazena os dados de todos os alunos que registraram presença (Nome, Email, Data/Hora do registro, IP).
-* `aula_estado.txt`: Indica se a aula está 'iniciada' ou não.
-* `timer_end.txt`: Guarda a data e hora exatas em que o cronômetro de presença deve terminar.
-* `ip_professor.txt`: Armazena o IP público do professor que iniciou a aula.
-* Backups: Arquivos CSV com timestamp (ex: `lista_presenca_20240517_103000.csv`) são criados na pasta da aplicação cada vez que uma lista é finalizada e enviada por e-mail.
+## ⚠️ Limitação Conhecida
 
-## 💡 Possíveis Melhorias e Próximos Passos
-
-* **Tratamento de Exceções Mais Específico:** Refinar os blocos `try-except` para capturar exceções mais granulares, facilitando o debug.
-* **Banco de Dados:** Para maior robustez e escalabilidade, substituir o uso de arquivos CSV e TXT por um banco de dados simples (ex: SQLite).
-* **Lógica de Identificação do Professor:** Aprimorar a lógica `is_professor` para depender menos do IP e mais da autenticação ativa na sessão.
-* **Finalização Automática Real:** Implementar uma lógica no backend para finalizar a lista e enviar o e-mail automaticamente quando o timer expirar, mesmo sem interação do professor.
-* **CAPTCHA Mais Robusto:** Considerar bibliotecas de CAPTCHA mais avançadas se a segurança contra bots se tornar uma preocupação maior.
-* **Interface de Gerenciamento:** Uma área para o professor visualizar/editar/exportar listas antigas.
-* **Personalização do Tempo do Cronômetro:** Permitir que o professor defina a duração do registro.
+A trava por IP público bloqueia um segundo registro vindo do mesmo IP. Em turmas presenciais onde todos usam o **mesmo Wi-Fi** (um único IP público de saída), apenas o primeiro aluno conseguirá registrar por essa rede — os demais podem usar dados móveis (4G/5G) ou ser registrados manualmente pelo professor. Em uso remoto/EAD (cada aluno em sua própria rede), a trava funciona de forma transparente.
 
 ## 👤 Autor
 

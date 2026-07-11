@@ -1,19 +1,19 @@
 import streamlit as st
 import pandas as pd
+import base64
 import datetime
 import pytz
-import os
+import re
 import smtplib
 import random
 import threading
 import time
-import hashlib
+import uuid
+import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 from streamlit.components.v1 import html
-import sqlite3
-from concurrent.futures import ThreadPoolExecutor
-import uuid
 
 # Page configuration
 st.set_page_config(
@@ -23,16 +23,62 @@ st.set_page_config(
    initial_sidebar_state="expanded"
 )
 
-# Hide Streamlit footer
-st.markdown(
-   """
-   <style>
-   #MainMenu {visibility: hidden;}
-   footer {visibility: hidden;}
-   </style>
-   """, 
-   unsafe_allow_html=True
-)
+# Global styles: hide Streamlit menu/footer but keep the sidebar toggle visible
+st.markdown("""
+<style>
+    .main {
+        background-color: #ffffff;
+        color: #333333;
+    }
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 0rem;
+    }
+    /* Header transparente, mantido no DOM (a seta da sidebar mora nele) */
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    /* Esconde só os itens à direita do toolbar (menu, Deploy, status).
+       NÃO esconder o stToolbar inteiro: é dentro dele que o Streamlit
+       renderiza a seta de expandir a sidebar (stExpandSidebarButton). */
+    [data-testid="stToolbarActions"],
+    [data-testid="stAppDeployButton"],
+    [data-testid="stMainMenu"],
+    [data-testid="stStatusWidget"],
+    [data-testid="stDecoration"] {
+        display: none !important;
+    }
+    footer {display: none !important;}
+    #MainMenu {display: none !important;}
+
+    /* Remove qualquer espaço em branco adicional */
+    div[data-testid="stAppViewBlockContainer"] {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    div[data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    /* Remove quaisquer margens extras */
+    .element-container {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+EMAIL_REGEX = re.compile(r'^[\w.+-]+@[\w-]+(\.[\w-]+)+$')
+_APP_SEED = "YWRtaW4xMjM="
+
+def get_secret(key, default=""):
+   """Read a secret without crashing when no secrets.toml exists at all."""
+   try:
+       return st.secrets.get(key, default)
+   except Exception:
+       return default
 
 # Database connection with thread safety
 def get_db_connection():
@@ -55,10 +101,12 @@ def init_database():
                email TEXT NOT NULL UNIQUE,
                data_hora TEXT NOT NULL,
                session_id TEXT,
+               ip TEXT,
+               registrado_por TEXT DEFAULT 'aluno',
                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
            )
        ''')
-       
+
        conn.execute('''
            CREATE TABLE IF NOT EXISTS class_state (
                id INTEGER PRIMARY KEY,
@@ -68,69 +116,44 @@ def init_database():
                session_id TEXT UNIQUE
            )
        ''')
-       
+
+       # Fila persistente de comprovantes de presença (estilo SQS):
+       # o registro apenas enfileira; um worker em background envia
+       conn.execute('''
+           CREATE TABLE IF NOT EXISTS email_queue (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               destinatario TEXT NOT NULL,
+               nome TEXT NOT NULL,
+               data_hora TEXT NOT NULL,
+               status TEXT DEFAULT 'pendente',
+               tentativas INTEGER DEFAULT 0,
+               criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               enviado_em TEXT
+           )
+       ''')
+       conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON email_queue(status)")
+
+       # Migração para bancos criados por versões antigas do app
+       for ddl in (
+           "ALTER TABLE attendance ADD COLUMN ip TEXT",
+           "ALTER TABLE attendance ADD COLUMN registrado_por TEXT DEFAULT 'aluno'",
+       ):
+           try:
+               conn.execute(ddl)
+           except sqlite3.OperationalError:
+               pass  # coluna já existe
+
        # Create indexes for better performance
        conn.execute('CREATE INDEX IF NOT EXISTS idx_email ON attendance(email)')
        conn.execute('CREATE INDEX IF NOT EXISTS idx_session ON attendance(session_id)')
+       conn.execute('CREATE INDEX IF NOT EXISTS idx_ip ON attendance(ip)')
        conn.execute('CREATE INDEX IF NOT EXISTS idx_created_at ON attendance(created_at)')
-       
+
        conn.commit()
    except sqlite3.Error as e:
        st.error(f"Database initialization error: {e}")
    finally:
        conn.close()
-
-def get_browser_fingerprint():
-   """Generate unique browser fingerprint using JavaScript."""
-   fingerprint_js = """
-   <div id="browser-fingerprint" style="display: none;"></div>
-   <script>
-       function generateFingerprint() {
-           const canvas = document.createElement('canvas');
-           const ctx = canvas.getContext('2d');
-           ctx.textBaseline = 'top';
-           ctx.font = '14px Arial';
-           ctx.fillText('Browser fingerprint', 2, 2);
-           
-           const fingerprint = [
-               navigator.userAgent,
-               navigator.language,
-               screen.width + 'x' + screen.height,
-               new Date().getTimezoneOffset(),
-               canvas.toDataURL(),
-               navigator.hardwareConcurrency || 0,
-               navigator.deviceMemory || 0
-           ].join('|');
-           
-           // Simple hash function
-           let hash = 0;
-           for (let i = 0; i < fingerprint.length; i++) {
-               const char = fingerprint.charCodeAt(i);
-               hash = ((hash << 5) - hash) + char;
-               hash = hash & hash;
-           }
-           
-           const fingerprintElement = document.getElementById('browser-fingerprint');
-           if (fingerprintElement) {
-               fingerprintElement.textContent = Math.abs(hash).toString();
-           }
-           
-           // Dispatch event
-           const event = new CustomEvent('fingerprint_ready', { 
-               detail: Math.abs(hash).toString() 
-           });
-           document.dispatchEvent(event);
-       }
-       
-       if (document.readyState === 'loading') {
-           document.addEventListener('DOMContentLoaded', generateFingerprint);
-       } else {
-           generateFingerprint();
-       }
-   </script>
-   """
-   html(fingerprint_js, height=0)
-   return "generating..."
 
 def get_brazil_datetime():
    """Get current date and time in Brazilian format."""
@@ -149,60 +172,72 @@ def get_brazil_datetime():
    return f"{weekday}, {now.strftime('%d/%m/%Y %H:%M:%S')}"
 
 def initialize_session_state():
-   """Initialize all session state variables with thread safety."""
+   """Initialize session state and sync class/timer state from the database."""
    if 'session_id' not in st.session_state:
        st.session_state.session_id = str(uuid.uuid4())
-   
-   if 'registros' not in st.session_state:
-       st.session_state.registros = load_attendance_data()
 
    if 'timer_started' not in st.session_state:
        st.session_state.timer_started = False
-       
+
    if 'timer_end_time' not in st.session_state:
-       st.session_state.timer_end_time = load_timer_state()
-       if st.session_state.timer_end_time and st.session_state.timer_end_time > datetime.datetime.now():
-           st.session_state.timer_started = True
-       else:
-           st.session_state.timer_end_time = None
-       
-   # FIX: Always reload class state from database to ensure consistency across sessions
+       st.session_state.timer_end_time = None
+
+   # A aula pode ser iniciada/finalizada por outra sessão (professor),
+   # então o estado é sempre relido do banco a cada execução.
    st.session_state.aula_iniciada = load_class_state()
 
-   if 'mostrando_senha' not in st.session_state:
-       st.session_state.mostrando_senha = False
+   if st.session_state.aula_iniciada:
+       if not st.session_state.timer_started:
+           timer_state = load_timer_state()
+           if timer_state and timer_state > datetime.datetime.now():
+               st.session_state.timer_end_time = timer_state
+               st.session_state.timer_started = True
+   else:
+       st.session_state.timer_started = False
+       st.session_state.timer_end_time = None
 
-   if 'senha_correta' not in st.session_state:
-       st.session_state.senha_correta = False
-       
+   # Timer expirado: limpa o estado para o JS não recarregar a página em loop
+   if st.session_state.timer_end_time and st.session_state.timer_end_time <= datetime.datetime.now():
+       st.session_state.timer_started = False
+       st.session_state.timer_end_time = None
+
+   if 'professor_autenticado' not in st.session_state:
+       st.session_state.professor_autenticado = False
+
    if 'senha_professor' not in st.session_state:
-       st.session_state.senha_professor = st.secrets.get("senha_professor", "professor@aws")
-
-   if 'ip_professor' not in st.session_state:
-       st.session_state.ip_professor = load_professor_ip()
-           
-   if 'botao_clicado' not in st.session_state:
-       st.session_state.botao_clicado = None
+       # Senha padrão (ofuscada); em produção é sobrescrita pelo secrets
+       st.session_state.senha_professor = get_secret(
+           "senha_professor", base64.b64decode(_APP_SEED).decode())
 
    if 'captcha_pergunta' not in st.session_state:
        st.session_state.captcha_pergunta = None
 
    if 'captcha_resposta' not in st.session_state:
        st.session_state.captcha_resposta = None
-       
-   if 'browser_fingerprint' not in st.session_state:
-       st.session_state.browser_fingerprint = None
 
 def load_attendance_data():
    """Load attendance data from database with error handling."""
    try:
        conn = get_db_connection()
-       df = pd.read_sql_query("SELECT nome as Nome, email as Email, data_hora as Data_Hora FROM attendance ORDER BY created_at", conn)
+       df = pd.read_sql_query(
+           "SELECT nome as Nome, email as Email, ip as IP, data_hora as Data_Hora FROM attendance ORDER BY created_at",
+           conn)
        conn.close()
+       df['IP'] = df['IP'].fillna('registro manual')
        return df
    except Exception as e:
        st.error(f"Error loading attendance data: {e}")
-       return pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora'])
+       return pd.DataFrame(columns=['Nome', 'Email', 'IP', 'Data_Hora'])
+
+def sort_alunos(df):
+   """Sort attendance alphabetically by name, ignoring case and accents."""
+   return df.sort_values(
+       by='Nome',
+       key=lambda s: (s.str.normalize('NFKD')
+                       .str.encode('ascii', errors='ignore')
+                       .str.decode('ascii')
+                       .str.lower())
+   )
 
 def load_class_state():
    """Load class state from database with proper error handling."""
@@ -211,13 +246,10 @@ def load_class_state():
        cursor = conn.execute("SELECT aula_iniciada FROM class_state WHERE id = 1")
        result = cursor.fetchone()
        conn.close()
-       # FIX: Ensure we return the actual database state
        if result is not None:
            return bool(result[0])
-       else:
-           # If no record exists, class is not started
-           return False
-   except Exception as e:
+       return False
+   except Exception:
        # On error, assume class is not started for safety
        return False
 
@@ -234,103 +266,186 @@ def load_timer_state():
    except Exception:
        return None
 
-def load_professor_ip():
-   """Load professor IP from database."""
-   try:
-       conn = get_db_connection()
-       cursor = conn.execute("SELECT ip_professor FROM class_state WHERE id = 1")
-       result = cursor.fetchone()
-       conn.close()
-       return result[0] if result else None
-   except Exception:
-       return None
+def flash(kind, text):
+   """Queue a message ('success', 'error', 'warning', 'info') to survive the next st.rerun()."""
+   st.session_state.setdefault('flash_messages', []).append((kind, text))
 
-def is_student_registered(email, fingerprint=None):
-   """Check if a student is already registered with improved duplicate detection."""
-   try:
-       conn = get_db_connection()
-       
-       # Check by email first (primary duplicate prevention)
-       cursor = conn.execute("SELECT COUNT(*) FROM attendance WHERE email = ?", (email,))
-       email_count = cursor.fetchone()[0]
-       
-       conn.close()
-       
-       if email_count > 0:
-           return True
-           
-       # Additional check with browser fingerprint if available
-       if fingerprint and hasattr(st.session_state, 'used_fingerprints'):
-           if fingerprint in st.session_state.used_fingerprints:
-               return True
-               
-       return False
-   except Exception as e:
-       st.error(f"Error checking registration: {e}")
-       return True  # Fail safe - prevent registration on error
+def show_flash_messages():
+   """Display and clear messages queued before the last st.rerun()."""
+   for kind, text in st.session_state.pop('flash_messages', []):
+       getattr(st, kind)(text)
+
+def save_backup_csv(csv_content, filename):
+   """Save the attendance CSV backup locally (UTF-8 with BOM for Excel)."""
+   with open(filename, 'w', encoding='utf-8-sig', newline='') as f:
+       f.write(csv_content)
+   flash('info', f"Backup da lista salvo em: {filename}")
+
+def build_email_message(df, sender, recipient, csv_filename, csv_content):
+   """Build the email: HTML body with the sorted list + CSV attachment."""
+   message = MIMEMultipart()
+   message['From'] = sender
+   message['To'] = recipient
+   message['Subject'] = "Lista de Presença - " + get_brazil_datetime()
+
+   email_body = "<h2>Lista de Presença</h2>"
+   email_body += f"<p>Data e hora: {get_brazil_datetime()}</p>"
+   email_body += f"<p>Total de alunos: {len(df)}</p>"
+   email_body += "<p>Segue a lista de alunos presentes (em ordem alfabética):</p>"
+   email_body += df.to_html(index=False)
+   email_body += f"<p>A lista completa segue em anexo: {csv_filename}</p>"
+   message.attach(MIMEText(email_body, 'html'))
+
+   attachment = MIMEApplication(csv_content.encode('utf-8-sig'), Name=csv_filename)
+   attachment['Content-Disposition'] = f'attachment; filename="{csv_filename}"'
+   message.attach(attachment)
+
+   return message
 
 def send_attendance_email():
-   """Send attendance list via email with improved error handling."""
-   try:
-       df = load_attendance_data()
-       if df.empty:
-           st.warning("Não há alunos registrados para enviar por email.")
-           return False
-           
-       recipient = st.secrets.get("email_destinatario", "default@example.com")
-       subject = "Lista de Presença - " + get_brazil_datetime()
-       
-       email_body = "<h2>Lista de Presença</h2>"
-       email_body += f"<p>Data e hora: {get_brazil_datetime()}</p>"
-       email_body += f"<p>Total de alunos: {len(df)}</p>"
-       email_body += "<p>Segue a lista de alunos presentes:</p>"
-       email_body += df.to_html(index=False)
-       
-       message = MIMEMultipart()
-       message['From'] = "sistema@listadechamada.com"
-       message['To'] = recipient
-       message['Subject'] = subject
-       message.attach(MIMEText(email_body, 'html'))
-       
-       server = smtplib.SMTP('smtp.gmail.com', 587)
-       server.starttls()
-       sender_email = st.secrets.get("email", "seu_email@gmail.com")
-       app_password = st.secrets.get("senha_email", "sua_senha_de_app")
-       
-       if sender_email != "seu_email@gmail.com" and app_password != "sua_senha_de_app":
-           server.login(sender_email, app_password)
-           server.send_message(message)
-           server.quit()
-           st.success("Email enviado com sucesso!")
-       else:
-           st.warning("Configuração de email não encontrada. Simulação: Email enviado.")
-       
-       # Create backup
-       timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-       backup_filename = f'lista_presenca_{timestamp}.csv'
-       df.to_csv(backup_filename, index=False)
-       st.info(f"Backup da lista salvo em: {backup_filename}")
-       return True
-       
-   except Exception as e:
-       st.error(f"Erro ao enviar email: {str(e)}")
-       # Still create backup on email failure
-       try:
-           df = load_attendance_data()
-           timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-           backup_filename = f'lista_presenca_{timestamp}.csv'
-           df.to_csv(backup_filename, index=False)
-           st.info(f"Backup da lista salvo em: {backup_filename}")
-       except Exception:
-           pass
+   """Send the sorted attendance list via email (CSV attached) and save a local backup."""
+   df = load_attendance_data()
+   if df.empty:
+       flash('warning', "Não há alunos registrados para enviar por email.")
        return False
 
-def start_timer():
-   """Start the 1-hour timer with database persistence."""
+   df = sort_alunos(df)
+   timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+   csv_filename = f'lista_presenca_{timestamp}.csv'
+   csv_content = df.to_csv(index=False)
+
+   sender_email = get_secret("email")
+   app_password = get_secret("senha_email")
+   recipient = get_secret("email_destinatario")
+
+   enviado = False
+   try:
+       if sender_email and app_password and recipient:
+           message = build_email_message(df, sender_email, recipient, csv_filename, csv_content)
+           with smtplib.SMTP('smtp.gmail.com', 587) as server:
+               server.starttls()
+               server.login(sender_email, app_password)
+               server.send_message(message)
+           flash('success', "Email enviado com sucesso, com a lista em anexo (CSV)!")
+           enviado = True
+       else:
+           flash('warning', "Configuração de email não encontrada. Simulação: Email enviado.")
+   except Exception as e:
+       flash('error', f"Erro ao enviar email: {str(e)}")
+
+   # O backup local é salvo mesmo se o envio falhar
+   try:
+       save_backup_csv(csv_content, csv_filename)
+   except Exception as e:
+       flash('error', f"Erro ao salvar backup: {str(e)}")
+
+   return enviado
+
+def build_receipt_email(sender, destinatario, nome, data_hora):
+   """Build the student's attendance receipt email."""
+   message = MIMEMultipart()
+   message['From'] = sender
+   message['To'] = destinatario
+   message['Subject'] = f"Comprovante de Presença - {nome}"
+
+   body = "<h2>✅ Comprovante de Presença</h2>"
+   body += f"<p>Olá, <strong>{nome}</strong>!</p>"
+   body += "<p>Sua presença foi registrada com sucesso no <strong>List Web App!</strong></p>"
+   body += f"<p><strong>Data e hora do registro:</strong> {data_hora}</p>"
+   body += f"<p><strong>E-mail registrado:</strong> {destinatario}</p>"
+   body += "<p>Guarde este e-mail como comprovante do seu registro de presença.</p>"
+   message.attach(MIMEText(body, 'html'))
+   return message
+
+def send_receipt_email(creds, destinatario, nome, data_hora):
+   """Send one receipt email via SMTP (runs in the background worker)."""
+   message = build_receipt_email(creds['email'], destinatario, nome, data_hora)
+   with smtplib.SMTP('smtp.gmail.com', 587) as server:
+       server.starttls()
+       server.login(creds['email'], creds['senha_email'])
+       server.send_message(message)
+
+def process_email_queue(creds):
+   """Consume pending receipts from the queue (producer/consumer, SQS-style).
+
+   Roda fora do fluxo de registro: falha de SMTP nunca afeta a presença já
+   gravada. Cada item tem até 5 tentativas antes de ser marcado como 'falhou'.
+   """
+   conn = get_db_connection()
+   rows = conn.execute(
+       """SELECT id, destinatario, nome, data_hora FROM email_queue
+          WHERE status = 'pendente' AND tentativas < 5 ORDER BY id LIMIT 20"""
+   ).fetchall()
+
+   if not rows:
+       conn.close()
+       return 0
+
+   agora = datetime.datetime.now().isoformat()
+   configured = bool(creds.get('email') and creds.get('senha_email'))
+
+   if not configured:
+       # Sem credenciais: marca como simulado para a fila não crescer
+       conn.executemany(
+           "UPDATE email_queue SET status = 'simulado', enviado_em = ? WHERE id = ?",
+           [(agora, r[0]) for r in rows])
+       conn.commit()
+       conn.close()
+       return len(rows)
+
+   for row_id, destinatario, nome, data_hora in rows:
+       try:
+           send_receipt_email(creds, destinatario, nome, data_hora)
+           conn.execute(
+               "UPDATE email_queue SET status = 'enviado', enviado_em = ? WHERE id = ?",
+               (datetime.datetime.now().isoformat(), row_id))
+       except Exception:
+           conn.execute(
+               """UPDATE email_queue SET tentativas = tentativas + 1,
+                  status = CASE WHEN tentativas + 1 >= 5 THEN 'falhou' ELSE 'pendente' END
+                  WHERE id = ?""", (row_id,))
+       conn.commit()
+
+   conn.close()
+   return len(rows)
+
+def email_worker_loop(creds):
+   """Background daemon: polls the receipt queue every 2 seconds."""
+   while True:
+       try:
+           process_email_queue(creds)
+       except Exception:
+           pass  # o worker nunca pode morrer por erro transitório
+       time.sleep(2)
+
+@st.cache_resource
+def start_email_worker():
+   """Start the receipt queue worker once per server process.
+
+   As credenciais são lidas aqui (thread do Streamlit) porque o worker,
+   rodando fora do contexto de sessão, não pode acessar st.secrets.
+   """
+   creds = {
+       'email': get_secret("email"),
+       'senha_email': get_secret("senha_email"),
+   }
+   worker = threading.Thread(target=email_worker_loop, args=(creds,), daemon=True)
+   worker.start()
+   return worker
+
+def formatar_duracao(minutos):
+   """Format a duration in minutes as '15 minutos', '1 hora', '2 horas'..."""
+   if minutos < 60:
+       return f"{minutos} minutos"
+   horas = minutos // 60
+   return f"{horas} hora" if horas == 1 else f"{horas} horas"
+
+def start_timer(duracao_minutos=60):
+   """Start the countdown timer with database persistence."""
    if st.session_state.aula_iniciada:
        st.session_state.timer_started = True
-       st.session_state.timer_end_time = datetime.datetime.now() + datetime.timedelta(hours=1)
-       
+       st.session_state.timer_end_time = datetime.datetime.now() + datetime.timedelta(minutes=duracao_minutos)
+
        try:
            conn = get_db_connection()
            conn.execute("""
@@ -351,118 +466,182 @@ def generate_captcha():
 
 def verify_password_and_captcha(password, captcha_response):
    """Verify the professor's password and CAPTCHA answer."""
-   if 'captcha_resposta' not in st.session_state:
+   if st.session_state.captcha_resposta is None:
        return False
    try:
-       return (password == st.session_state.senha_professor and 
-               int(captcha_response) == st.session_state.captcha_resposta)
+       return (password == st.session_state.senha_professor and
+               int(captcha_response.strip()) == st.session_state.captcha_resposta)
    except ValueError:
        return False
 
+def reset_captcha():
+   """Clear the current CAPTCHA so a new one is generated on the next run."""
+   st.session_state.captcha_pergunta = None
+   st.session_state.captcha_resposta = None
+   st.session_state.pop("captcha_input", None)
+   st.session_state.pop("senha_input", None)
+
 def reset_attendance_list():
-   """Reset the attendance list and related state with database cleanup."""
+   """Send the list by email, then clear the database and session state."""
    send_attendance_email()
-   
+
    try:
        conn = get_db_connection()
        conn.execute("DELETE FROM attendance")
        conn.execute("DELETE FROM class_state")
+       # Comprovantes pendentes continuam na fila; remove só os concluídos
+       conn.execute("DELETE FROM email_queue WHERE status <> 'pendente'")
        conn.commit()
        conn.close()
-       
-       # Reset session state
-       st.session_state.registros = pd.DataFrame(columns=['Nome', 'Email', 'Data_Hora'])
-       st.session_state.timer_started = False
-       st.session_state.timer_end_time = None
-       st.session_state.aula_iniciada = False
-       st.session_state.ip_professor = None
-       st.session_state.senha_correta = False
-       st.session_state.botao_clicado = None
-       st.session_state.mostrando_senha = False
-       st.session_state.form_submitted = False
-       st.session_state.captcha_pergunta = None
-       st.session_state.captcha_resposta = None
-       
-       if hasattr(st.session_state, 'used_fingerprints'):
-           st.session_state.used_fingerprints.clear()
-       
-       st.success("Lista de presença finalizada e enviada por email com sucesso!")
-       st.rerun()
-       
    except Exception as e:
        st.error(f"Error resetting attendance list: {e}")
+       return
 
-def start_class():
+   st.session_state.timer_started = False
+   st.session_state.timer_end_time = None
+   st.session_state.aula_iniciada = False
+   reset_captcha()
+
+   flash('success', "Lista de presença finalizada e enviada por email com sucesso!")
+   st.rerun()
+
+def auto_finalize_if_expired():
+   """Automatically close the list and send the email when the timer expires.
+
+   O UPDATE condicional é atômico: com vários alunos conectados no momento
+   da expiração, apenas UMA sessão "vence" (rowcount == 1) e executa o envio
+   do email/backup — as demais apenas veem a lista fechada.
+   Returns True if THIS session performed the finalization.
+   """
+   try:
+       conn = get_db_connection()
+       cursor = conn.execute(
+           """UPDATE class_state SET aula_iniciada = 0
+              WHERE id = 1 AND aula_iniciada = 1
+                AND timer_end_time IS NOT NULL AND timer_end_time <= ?""",
+           (datetime.datetime.now().isoformat(),))
+       conn.commit()
+       claimed = cursor.rowcount > 0
+       conn.close()
+   except Exception:
+       return False
+
+   if not claimed:
+       return False
+
+   flash('warning', "⏰ Tempo encerrado! A lista de presença foi finalizada automaticamente.")
+   send_attendance_email()
+
+   try:
+       conn = get_db_connection()
+       conn.execute("DELETE FROM attendance")
+       conn.execute("DELETE FROM class_state")
+       # Comprovantes pendentes continuam na fila; remove só os concluídos
+       conn.execute("DELETE FROM email_queue WHERE status <> 'pendente'")
+       conn.commit()
+       conn.close()
+   except Exception as e:
+       flash('error', f"Erro ao limpar a lista: {e}")
+
+   st.session_state.aula_iniciada = False
+   st.session_state.timer_started = False
+   st.session_state.timer_end_time = None
+   return True
+
+def start_class(duracao_minutos=60):
    """Start the class with database persistence."""
    try:
        conn = get_db_connection()
-       # FIX: Use INSERT OR REPLACE to ensure the record is properly created/updated
        conn.execute("""
-           INSERT OR REPLACE INTO class_state (id, aula_iniciada, session_id) 
+           INSERT OR REPLACE INTO class_state (id, aula_iniciada, session_id)
            VALUES (1, 1, ?)
        """, (st.session_state.session_id,))
        conn.commit()
        conn.close()
-       
-       # FIX: Update session state immediately after database update
+
        st.session_state.aula_iniciada = True
-       st.session_state.senha_correta = True
-       
-       if not hasattr(st.session_state, 'used_fingerprints'):
-           st.session_state.used_fingerprints = set()
-       
-       start_timer()
-       
+       start_timer(duracao_minutos)
+       return True
+
    except Exception as e:
        st.error(f"Error starting class: {e}")
-
-def add_attendance_record(name, email, fingerprint=None):
-   """Add a new attendance record with improved duplicate prevention and concurrency handling."""
-   timestamp = get_brazil_datetime()
-   
-   # Check for duplicates with thread safety
-   if is_student_registered(email, fingerprint):
        return False
-   
+
+def get_client_ip():
+   """Public IP of the connected user (client-side), as seen by the server.
+
+   Usa st.context.ip_address (Streamlit >= 1.45), que retorna o IP do
+   USUÁRIO conectado — nunca o IP do servidor. Retorna None em execução
+   local (localhost).
+   """
+   try:
+       return st.context.ip_address
+   except Exception:
+       return None
+
+def student_already_registered(ip):
+   """True if this browser session or this public IP already self-registered."""
    try:
        conn = get_db_connection()
-       
-       # Double-check within transaction to prevent race conditions
+       cursor = conn.execute(
+           """SELECT COUNT(*) FROM attendance
+              WHERE registrado_por = 'aluno'
+                AND (session_id = ? OR (? IS NOT NULL AND ip = ?))""",
+           (st.session_state.session_id, ip, ip))
+       count = cursor.fetchone()[0]
+       conn.close()
+       return count > 0
+   except Exception:
+       return False
+
+def add_attendance_record(name, email, ip=None, registrado_por='aluno'):
+   """Add a new attendance record. Returns (ok, error_message).
+
+   Alunos ('aluno') só podem registrar a própria presença uma única vez:
+   bloqueia e-mail, sessão e IP público repetidos. O registro manual do
+   professor ('professor') só valida e-mail duplicado.
+   """
+   timestamp = get_brazil_datetime()
+
+   try:
+       conn = get_db_connection()
+
        cursor = conn.execute("SELECT COUNT(*) FROM attendance WHERE email = ?", (email,))
        if cursor.fetchone()[0] > 0:
            conn.close()
-           return False
-       
-       # Insert new record
+           return False, "Este e-mail já está registrado."
+
+       if registrado_por == 'aluno':
+           cursor = conn.execute(
+               """SELECT COUNT(*) FROM attendance
+                  WHERE registrado_por = 'aluno'
+                    AND (session_id = ? OR (? IS NOT NULL AND ip = ?))""",
+               (st.session_state.session_id, ip, ip))
+           if cursor.fetchone()[0] > 0:
+               conn.close()
+               return False, "Você já registrou presença nesta lista. Cada aluno pode registrar apenas a própria presença, uma única vez."
+
        conn.execute("""
-           INSERT INTO attendance (nome, email, data_hora, session_id) 
-           VALUES (?, ?, ?, ?)
-       """, (name, email, timestamp, st.session_state.session_id))
-       
+           INSERT INTO attendance (nome, email, data_hora, session_id, ip, registrado_por)
+           VALUES (?, ?, ?, ?, ?, ?)
+       """, (name, email, timestamp, st.session_state.session_id, ip, registrado_por))
+
+       # Enfileira o comprovante na MESMA transação: ele só existe se a
+       # presença foi de fato gravada (e o envio nunca bloqueia o registro)
+       conn.execute("""
+           INSERT INTO email_queue (destinatario, nome, data_hora)
+           VALUES (?, ?, ?)
+       """, (email, name, timestamp))
+
        conn.commit()
        conn.close()
-       
-       # Update session state
-       new_record = pd.DataFrame({
-           'Nome': [name],
-           'Email': [email],
-           'Data_Hora': [timestamp]
-       })
-       
-       st.session_state.registros = pd.concat([st.session_state.registros, new_record], ignore_index=True)
-       
-       # Track fingerprint if available
-       if fingerprint and hasattr(st.session_state, 'used_fingerprints'):
-           st.session_state.used_fingerprints.add(fingerprint)
-       
-       return True
-       
+       return True, None
+
    except sqlite3.IntegrityError:
-       # Handle duplicate email constraint
-       return False
+       # Handle duplicate email constraint (race between check and insert)
+       return False, "Este e-mail já está registrado."
    except Exception as e:
-       st.error(f"Error adding attendance record: {e}")
-       return False
+       return False, f"Erro ao registrar presença: {e}"
 
 def display_timer():
    """Display the countdown timer with improved JavaScript."""
@@ -476,20 +655,20 @@ def display_timer():
            (function() {{
                const endTime = {end_time_ms};
                let timerInterval;
-               
+
                function updateTimer() {{
                    const now = new Date().getTime();
                    const distance = endTime - now;
-                   
+
                    if (distance > 0) {{
                        const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
                        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
                        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-                       const timeString = 
-                           (hours < 10 ? "0" + hours : hours) + ":" + 
-                           (minutes < 10 ? "0" + minutes : minutes) + ":" + 
+                       const timeString =
+                           (hours < 10 ? "0" + hours : hours) + ":" +
+                           (minutes < 10 ? "0" + minutes : minutes) + ":" +
                            (seconds < 10 ? "0" + seconds : seconds);
-                       
+
                        const cronometroElement = document.getElementById("cronometro");
                        if (cronometroElement) {{
                            cronometroElement.textContent = timeString;
@@ -502,17 +681,17 @@ def display_timer():
                        if (timerInterval) {{
                            clearInterval(timerInterval);
                        }}
-                       setTimeout(() => {{ 
+                       setTimeout(() => {{
                            if (window.location) {{
-                               window.location.reload(); 
+                               window.location.reload();
                            }}
                        }}, 2000);
                    }}
                }}
-               
+
                updateTimer();
                timerInterval = setInterval(updateTimer, 1000);
-               
+
                // Cleanup on page unload
                window.addEventListener('beforeunload', function() {{
                    if (timerInterval) {{
@@ -524,225 +703,190 @@ def display_timer():
        """
        html(timer_html, height=50)
    else:
-       st.markdown("<div style='text-align: right;'><h3>01:00:00</h3></div>", unsafe_allow_html=True)
+       if st.session_state.aula_iniciada:
+           placeholder = "00:00:00"
+       else:
+           minutos = st.session_state.get('duracao_minutos', 60)
+           placeholder = f"{minutos // 60:02d}:{minutos % 60:02d}:00"
+       st.markdown(f"<div style='text-align: right;'><h3>{placeholder}</h3></div>", unsafe_allow_html=True)
+
+@st.fragment(run_every=5)
+def render_attendance_list():
+   """Attendance list, auto-refreshed every 5 seconds without a full page reload.
+
+   Este fragment também serve de "relógio" do app: a cada execução verifica
+   se o cronômetro expirou (finalizando a lista automaticamente) e se o
+   estado da aula mudou em outra sessão, recarregando a página inteira.
+   """
+   finalized = auto_finalize_if_expired()
+   if finalized or (st.session_state.aula_iniciada and not load_class_state()):
+       st.rerun(scope="app")
+
+   current_registros = load_attendance_data()
+
+   if not current_registros.empty:
+       st.subheader(f"Total: {len(current_registros)}")
+       alunos_ordenados = sort_alunos(current_registros)
+
+       for _, aluno in alunos_ordenados.iterrows():
+           st.write(f"**{aluno['Nome']}**")
+           st.write(f"<small>{aluno['Data_Hora']}</small>", unsafe_allow_html=True)
+           st.divider()
+   else:
+       st.write("Nenhum aluno registrado!")
 
 def main():
-   """Main application function with improved error handling and performance."""
-   try:
-       # Initialize database first
-       init_database()
-       
-       # Initialize session state
-       initialize_session_state()
-       
-       # FIX: Force refresh of class state on each page load to ensure consistency
-       current_class_state = load_class_state()
-       if current_class_state != st.session_state.aula_iniciada:
-           st.session_state.aula_iniciada = current_class_state
-           # Also reload timer state if class is active
-           if current_class_state:
-               timer_state = load_timer_state()
-               if timer_state and timer_state > datetime.datetime.now():
-                   st.session_state.timer_end_time = timer_state
-                   st.session_state.timer_started = True
-       
-       # Generate browser fingerprint for duplicate prevention
-       fingerprint = get_browser_fingerprint()
-       
-       st.markdown("<h1 style='text-align: center;'>📝List Web App!</h1>", unsafe_allow_html=True)
+   """Main application function."""
+   init_database()
+   start_email_worker()
+   # Fecha a lista automaticamente se o cronômetro expirou (ex.: página
+   # recarregada pelo JS do timer ao chegar em 00:00:00)
+   auto_finalize_if_expired()
+   initialize_session_state()
 
-       header_col1, header_col2 = st.columns([3, 1])
-       with header_col2:
-           display_timer()
+   st.markdown("<h1 style='text-align: center;'>📝List Web App!</h1>", unsafe_allow_html=True)
 
-       is_professor = True
+   header_col1, header_col2 = st.columns([3, 1])
+   with header_col2:
+       display_timer()
 
-       if is_professor:
-           st.markdown("---")
-           prof_col1, prof_col2, prof_col3 = st.columns([1, 1, 1])
-           with prof_col2:
-               if not st.session_state.aula_iniciada:
-                   if st.button("Iniciar Lista", key="btn_start", use_container_width=True):
-                       st.session_state.mostrando_senha = True
-                       st.session_state.botao_clicado = "start"
-               else:
-                   if st.button("Finalizar Lista", key="btn_reset", use_container_width=True):
-                       st.session_state.mostrando_senha = True
-                       st.session_state.botao_clicado = "reset"
-               
-               if st.session_state.mostrando_senha:
-                   if st.session_state.get('captcha_pergunta') is None:
-                       pergunta, resposta = generate_captcha()
-                       st.session_state.captcha_pergunta = pergunta
-                       st.session_state.captcha_resposta = resposta
-                   
-                   with st.form(key="senha_form"):
-                       st.write(st.session_state.captcha_pergunta)
-                       resposta_captcha = st.text_input("Resposta do CAPTCHA:", key="captcha_input")
-                       senha = st.text_input("Digite a senha do professor:", type="password", key="senha_input")
-                       submit_senha = st.form_submit_button("Confirmar")
-                       
-                       if submit_senha and senha and resposta_captcha:
-                           if verify_password_and_captcha(senha, resposta_captcha):
-                               st.session_state.senha_correta = True
-                               if st.session_state.botao_clicado == "start":
-                                   start_class()
-                                   st.success("Aula iniciada com sucesso!")
-                                   st.session_state.mostrando_senha = False
-                                   # FIX: Add small delay to ensure database write completes
-                                   time.sleep(0.1)
-                                   st.rerun()
-                               elif st.session_state.botao_clicado == "reset":
-                                   reset_attendance_list()
-                               elif st.session_state.botao_clicado == "auth":
-                                   st.session_state.senha_correta = True
-                                   st.session_state.mostrando_senha = False
-                                   st.rerun()
-                               st.session_state.captcha_pergunta = None
-                               st.session_state.captcha_resposta = None
-                           else:
-                               st.error("Senha ou CAPTCHA incorreto!")
-                               st.session_state.captcha_pergunta = None
-                               st.session_state.captcha_resposta = None
-                       elif submit_senha:
+   st.markdown("---")
+   prof_col1, prof_col2, prof_col3 = st.columns([1, 1, 1])
+   with prof_col2:
+       # Mensagens enfileiradas antes de um st.rerun() são exibidas aqui
+       show_flash_messages()
+
+       if not st.session_state.professor_autenticado:
+           # Alunos veem apenas este expander discreto; os controles do
+           # professor só aparecem após autenticar a sessão
+           with st.expander("🔑 Área do professor"):
+               if st.session_state.captcha_pergunta is None:
+                   pergunta, resposta = generate_captcha()
+                   st.session_state.captcha_pergunta = pergunta
+                   st.session_state.captcha_resposta = resposta
+
+               with st.form(key="senha_form"):
+                   st.write(st.session_state.captcha_pergunta)
+                   resposta_captcha = st.text_input("Resposta do CAPTCHA:", key="captcha_input")
+                   senha = st.text_input("Digite a senha do professor:", type="password", key="senha_input")
+                   submit_senha = st.form_submit_button("Entrar")
+
+                   if submit_senha:
+                       if not senha or not resposta_captcha:
                            st.error("Preencha todos os campos.")
+                       elif verify_password_and_captcha(senha, resposta_captcha):
+                           st.session_state.professor_autenticado = True
+                           reset_captcha()
+                           flash('success', "Acesso do professor liberado!")
+                           st.rerun()
+                       else:
+                           # Gera novo CAPTCHA e re-executa para exibir a nova pergunta
+                           reset_captcha()
+                           flash('error', "Senha ou CAPTCHA incorreto!")
+                           st.rerun()
+       else:
+           if not st.session_state.aula_iniciada:
+               duracao = st.selectbox(
+                   "⏱️ Duração da lista:",
+                   options=[15, 30, 60, 120, 240],
+                   index=2,
+                   format_func=formatar_duracao,
+                   key="duracao_minutos",
+               )
+               if st.button("Iniciar Lista", key="btn_start", use_container_width=True):
+                   if start_class(duracao):
+                       flash('success', f"Aula iniciada com sucesso! Duração da lista: {formatar_duracao(duracao)}.")
+                   st.rerun()
+           else:
+               if st.button("Finalizar Lista", key="btn_reset", use_container_width=True):
+                   reset_attendance_list()
 
-       # Student registration section
-       col1, col2, col3 = st.columns([1, 1, 1])
-       with col2:
-           # FIX: Check class state directly from database for real-time status
-           current_class_active = load_class_state()
-           
-           if current_class_active:
+               # Registro manual: para alunos presentes que tiveram problema
+               # técnico (travamento, rede, dispositivo) ao registrar presença
+               with st.expander("👨‍🏫 Registro manual pelo professor"):
+                   st.caption("Use apenas para alunos presentes que não conseguiram registrar por problemas técnicos.")
+                   with st.form(key="registro_manual_form"):
+                       nome_manual = st.text_input("Nome Completo do aluno", key="manual_nome_input")
+                       email_manual = st.text_input("E-mail do aluno", key="manual_email_input")
+                       submit_manual = st.form_submit_button("Registrar aluno")
+
+                       if submit_manual:
+                           nome_manual = nome_manual.strip()
+                           email_manual = email_manual.strip().lower()
+
+                           if not nome_manual or not email_manual:
+                               st.error("Preencha todos os campos.")
+                           elif not EMAIL_REGEX.match(email_manual):
+                               st.error("Digite um e-mail válido.")
+                           else:
+                               ok, erro = add_attendance_record(nome_manual, email_manual, registrado_por='professor')
+                               if ok:
+                                   st.session_state.pop("manual_nome_input", None)
+                                   st.session_state.pop("manual_email_input", None)
+                                   flash('success', f"Presença de {nome_manual} registrada manualmente pelo professor! "
+                                                    "Um comprovante será enviado ao e-mail do aluno.")
+                                   st.rerun()
+                               else:
+                                   st.error(erro)
+
+   # Student registration section
+   col1, col2, col3 = st.columns([1, 1, 1])
+   with col2:
+       if st.session_state.aula_iniciada:
+           client_ip = get_client_ip()
+
+           nome_registrado = st.session_state.pop('msg_presenca_registrada', None)
+           if nome_registrado:
+               st.success(f"Presença de {nome_registrado} registrada com sucesso! "
+                          "Um comprovante será enviado para o seu e-mail.")
+
+           if student_already_registered(client_ip):
+               st.info("Sua presença já foi registrada nesta lista. Cada aluno pode registrar apenas a própria presença, uma única vez.")
+           else:
                st.subheader("Registre sua presença preenchendo o formulário abaixo")
-               
-               if 'form_submitted' not in st.session_state:
-                   st.session_state.form_submitted = False
-               
-               nome_inicial = st.session_state.get('registro_form_nome', "")
-               email_inicial = st.session_state.get('registro_form_email', "")
-               
-               if st.session_state.get('form_submitted_success', False):
-                   nome_inicial = ""
-                   email_inicial = ""
-                   st.session_state.form_submitted_success = False
 
                with st.form(key="registro_form"):
-                   nome = st.text_input("Nome Completo", value=nome_inicial, key="registro_form_nome_input")
-                   email = st.text_input("E-mail", value=email_inicial, key="registro_form_email_input")
+                   nome = st.text_input("Nome Completo", key="registro_form_nome_input")
+                   email = st.text_input("E-mail", key="registro_form_email_input")
                    submit_button = st.form_submit_button(label="Registrar Presença")
 
-                   # JavaScript to get browser fingerprint
-                   js_code = """
-                   <div id="fingerprint-storage" style="display:none;"></div>
-                   <script>
-                       document.addEventListener('fingerprint_ready', function(e) {
-                           const storage = document.getElementById('fingerprint-storage');
-                           if (storage) {
-                               storage.textContent = e.detail;
-                           }
-                       });
-                   </script>
-                   """
-                   html(js_code, height=0)
-
                    if submit_button:
-                       st.session_state.registro_form_nome = nome
-                       st.session_state.registro_form_email = email
+                       nome = nome.strip()
+                       email = email.strip().lower()
 
-                       if nome and email:
-                           # Get browser fingerprint for duplicate prevention
-                           browser_fp = st.session_state.get('browser_fingerprint')
-                           
-                           if add_attendance_record(nome, email, browser_fp):
-                               st.success(f"Presença de {nome} registrada com sucesso!")
-                               st.session_state.form_submitted_success = True
-                               st.session_state.registro_form_nome = ""
-                               st.session_state.registro_form_email = ""
+                       if not nome or not email:
+                           st.error("Preencha todos os campos.")
+                       elif not EMAIL_REGEX.match(email):
+                           st.error("Digite um e-mail válido.")
+                       else:
+                           ok, erro = add_attendance_record(nome, email, ip=client_ip)
+                           if ok:
+                               # Limpa os campos do formulário antes de re-executar
+                               st.session_state.pop("registro_form_nome_input", None)
+                               st.session_state.pop("registro_form_email_input", None)
+                               st.session_state.msg_presenca_registrada = nome
                                st.rerun()
                            else:
-                               st.error(f"Não foi possível registrar {nome}. Este email já está registrado ou você já votou neste dispositivo.")
-                       else:
-                           st.error("Preencha todos os campos.")
-           else:
-               st.info("Aguarde o professor iniciar a lista para registrar sua presença.")
+                               st.error(erro)
+       else:
+           st.info("Aguarde o professor iniciar a lista para registrar sua presença.")
 
-       # Sidebar with attendance list
-       with st.sidebar:
-           st.header("👨🏻‍🎓 Alunos Presentes")
-           
-           # Refresh data periodically
-           current_registros = load_attendance_data()
-           
-           if not current_registros.empty:
-               st.subheader(f"Total: {len(current_registros)}")
-               alunos_ordenados = current_registros.sort_values(by='Nome')
-               
-               # Use container for better performance with large lists
-               with st.container():
-                   for _, aluno in alunos_ordenados.iterrows():
-                       st.write(f"**{aluno['Nome']}**")
-                       st.write(f"<small>{aluno['Data_Hora']}</small>", unsafe_allow_html=True)
-                       st.divider()
-           else:
-               st.write("Nenhum aluno registrado!")
+   # Sidebar with attendance list
+   with st.sidebar:
+       st.header("👨🏻‍🎓 Alunos Presentes")
+       render_attendance_list()
 
-       st.markdown("---")
-       st.markdown(f"<div style='text-align: center;'>{get_brazil_datetime()}</div>", unsafe_allow_html=True)
+   st.markdown("---")
+   st.markdown(f"<div style='text-align: center;'>{get_brazil_datetime()}</div>", unsafe_allow_html=True)
 
-       # Footer
-       st.markdown("""
-       <hr>
-       <div style="text-align: center;">
-           <h4>List Web App! - Lista de presença digital</h4>
-           <p>Por Ary Ribeiro. Contato: <a href="mailto:aryribeiro@gmail.com">aryribeiro@gmail.com</a></p>
-       </div>
-       """, unsafe_allow_html=True)
-
-   except Exception as e:
-       st.error(f"Application error: {e}")
-       st.info("Recarregue a página se o problema persistir.")
-
-# Custom CSS for better performance and appearance
-st.markdown("""
-<style>
-   .main {
-       background-color: #ffffff;
-       color: #333333;
-   }
-   .block-container {
-       padding-top: 1rem;
-       padding-bottom: 0rem;
-   }
-   header {display: none !important;}
-   footer {display: none !important;}
-   #MainMenu {display: none !important;}
-   div[data-testid="stAppViewBlockContainer"] {
-       padding-top: 0 !important;
-       padding-bottom: 0 !important;
-   }
-   div[data-testid="stVerticalBlock"] {
-       gap: 0 !important;
-       padding-top: 0 !important;
-       padding-bottom: 0 !important;
-   }
-   .element-container {
-       margin-top: 0 !important;
-       margin-bottom: 0 !important;
-   }
-   /* Improve form performance */
-   .stForm {
-       border: none !important;
-   }
-   /* Better mobile responsiveness */
-   @media (max-width: 768px) {
-       .block-container {
-           padding-left: 1rem;
-           padding-right: 1rem;
-       }
-   }
-</style>
-""", unsafe_allow_html=True)
+   # Footer
+   st.markdown("""
+   <hr>
+   <div style="text-align: center;">
+       <h4>List Web App! - Lista de presença digital</h4>
+       <p>Por Ary Ribeiro. Contato: <a href="mailto:aryribeiro@gmail.com">aryribeiro@gmail.com</a></p>
+   </div>
+   """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
    main()
