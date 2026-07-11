@@ -685,8 +685,13 @@ def display_timer():
    if st.session_state.timer_started and st.session_state.timer_end_time:
        end_time_ms = int(st.session_state.timer_end_time.timestamp() * 1000)
        timer_html = f"""
+       <link rel="preconnect" href="https://fonts.googleapis.com">
+       <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@600&display=swap" rel="stylesheet">
        <div style='text-align: right;'>
-           <h3 id="cronometro">Carregando...</h3>
+           <!-- Mesma fonte/tamanho do h3 do Streamlit (medido: Source Sans 28px/600) -->
+           <h3 id="cronometro" style="font-family: 'Source Sans 3', 'Source Sans', sans-serif;
+               font-size: 28px; font-weight: 600; color: rgb(49, 51, 63);
+               line-height: 1.2; margin: 0;">Carregando...</h3>
        </div>
        <script>
            (function() {{
@@ -921,7 +926,8 @@ def main():
    <hr>
    <div style="text-align: center;">
        <h4>List Web App! - Lista de presença digital</h4>
-       <p>Por Ary Ribeiro. Contato: <a href="mailto:aryribeiro@gmail.com">aryribeiro@gmail.com</a></p>
+       <p><em>por <a href="https://www.linkedin.com/in/aryribeiro" target="_blank" rel="noopener"
+       style="text-decoration: none; color: inherit;"><strong>Ary Ribeiro</strong></a></em></p>
    </div>
    """, unsafe_allow_html=True)
 
