@@ -8,7 +8,7 @@ List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamen
 ## ✨ Funcionalidades Principais
 
 * **Área do professor protegida:** os controles administrativos ficam ocultos dos alunos. O professor autentica-se uma vez por sessão (senha + CAPTCHA) no expander "🔑 Área do professor" e então pode iniciar/finalizar a lista sem redigitar a senha a cada ação.
-* **Registro individual com trava anti-fraude:** cada aluno registra apenas a própria presença, **uma única vez**. O bloqueio de duplicidade combina três verificações: e-mail (normalizado, insensível a maiúsculas), sessão do navegador e **IP público do aluno** (obtido via `st.context.ip_address` — o IP do cliente conectado, nunca o do servidor).
+* **Registro individual com trava anti-fraude:** cada aluno registra apenas a própria presença, **uma única vez**. O bloqueio de duplicidade combina três verificações: e-mail (normalizado, insensível a maiúsculas), sessão do navegador e **IP público do aluno** (capturado no próprio navegador via `streamlit-js-eval` + ipify, pois o proxy do Streamlit Cloud não repassa o IP do cliente ao servidor).
 * **Registro manual pelo professor:** para alunos presentes que tiveram travamentos ou problemas de rede/dispositivo, o professor autenticado pode registrá-los manualmente (expander "👨‍🏫 Registro manual pelo professor"). Esses registros ficam auditados no banco como `registrado_por = 'professor'` e aparecem com IP "registro manual" na lista.
 * **Cronômetro com duração configurável e finalização automática:** antes de iniciar a lista, o professor escolhe a duração — **15 min, 30 min, 1 hora (padrão), 2 horas ou 4 horas**. Quando o tempo termina, a lista **fecha sozinha e o e-mail é enviado automaticamente**, sem intervenção do professor. Um mecanismo atômico no banco garante que apenas uma sessão execute o envio, mesmo com vários alunos conectados no momento da expiração.
 * **E-mail com CSV em anexo:** ao finalizar (manual ou automaticamente), o destinatário configurado recebe um e-mail com a lista em HTML no corpo **e o arquivo CSV em anexo** (UTF-8 com BOM, compatível com Excel). Corpo e CSV vêm em **ordem alfabética** (ignorando maiúsculas/acentos), com Nome, E-mail, **IP público** e Data/Hora de cada registro.
@@ -22,7 +22,7 @@ List Web App é uma aplicação web desenvolvida em Streamlit para o gerenciamen
 ## 🚀 Tecnologias Utilizadas
 
 * **Python 3.x**
-* **Streamlit ≥ 1.45** — interface web, `st.context.ip_address` (IP do cliente) e `st.fragment` (atualização em tempo real)
+* **Streamlit ≥ 1.45** — interface web e `st.fragment` (atualização em tempo real); IP do cliente via `streamlit-js-eval` (capturado no navegador)
 * **SQLite (WAL)** — persistência com acesso concorrente
 * **Pandas** — manipulação da lista e geração do CSV
 * **Pytz** — fuso horário de São Paulo

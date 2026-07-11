@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import base64
 import datetime
+import ipaddress
 import pytz
 import re
 import smtplib
@@ -14,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from streamlit.components.v1 import html
+from streamlit_js_eval import streamlit_js_eval
 
 # Page configuration
 st.set_page_config(
@@ -51,6 +53,10 @@ st.markdown("""
     }
     footer {display: none !important;}
     #MainMenu {display: none !important;}
+    /* Esconde o iframe invisível do componente que captura o IP no navegador */
+    iframe[title="streamlit_js_eval.streamlit_js_eval"] {
+        display: none !important;
+    }
 
     /* Remove qualquer espaço em branco adicional */
     div[data-testid="stAppViewBlockContainer"] {
@@ -567,15 +573,46 @@ def start_class(duracao_minutos=60):
        st.error(f"Error starting class: {e}")
        return False
 
-def get_client_ip():
-   """Public IP of the connected user (client-side), as seen by the server.
-
-   Usa st.context.ip_address (Streamlit >= 1.45), que retorna o IP do
-   USUÁRIO conectado — nunca o IP do servidor. Retorna None em execução
-   local (localhost).
-   """
+def _public_ip(value):
+   """Retorna o IP público normalizado, ou None. Descarta loopback e redes
+   privadas (192.168.x/10.x) — que é tudo o que o proxy do Streamlit Cloud
+   entrega ao servidor, inviabilizando a detecção server-side."""
    try:
-       return st.context.ip_address
+       ip_obj = ipaddress.ip_address(value)
+       if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+           ip_obj = ip_obj.ipv4_mapped
+       return str(ip_obj) if ip_obj.is_global else None
+   except (ValueError, TypeError):
+       return None
+
+def get_browser_public_ip():
+   """IP público obtido no NAVEGADOR do aluno via JS — independe do proxy.
+   Retorna None no 1º render; o valor chega num rerun seguinte."""
+   try:
+       return streamlit_js_eval(
+           js_expressions="fetch('https://api.ipify.org').then(r => r.text()).catch(() => null)",
+           key="browser_public_ip",
+       )
+   except Exception:
+       return None
+
+def get_client_ip():
+   """Public IP of the connected user.
+
+   Fonte principal: capturado no navegador do aluno (streamlit-js-eval),
+   pois o proxy do Streamlit Cloud não repassa o IP público ao servidor.
+   Fallback: st.context.ip_address (aceito apenas se for IP público).
+   Retorna None em execução local (localhost).
+   """
+   browser_ip = get_browser_public_ip()
+   if browser_ip:
+       normalized = _public_ip(str(browser_ip).strip())
+       if normalized:
+           st.session_state.client_public_ip = normalized
+   if st.session_state.get("client_public_ip"):
+       return st.session_state.client_public_ip
+   try:
+       return _public_ip(st.context.ip_address)
    except Exception:
        return None
 
